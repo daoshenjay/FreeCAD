@@ -57,6 +57,7 @@ class ViewProviderDraftLink(ViewProviderDraft):
             return ":/icons/Draft_PointLinkArray.svg"
 
     def updateData(self, obj, prop):
+        super().updateData(obj, prop)
         if prop == "Base":
             obj.ViewObject.update()
 

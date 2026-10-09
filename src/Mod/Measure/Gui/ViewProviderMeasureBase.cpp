@@ -779,7 +779,7 @@ Base::Vector3d ViewProviderMeasure::getTextPosition()
 
     // Convert to screenspace, offset and convert back to world space
     SbVec2s screenPos = viewer->getPointOnViewport(SbVec3f(basePoint.x, basePoint.y, basePoint.z));
-    SbVec3f vec = viewer->getPointOnFocalPlane(screenPos + SbVec2s(30.0, 30.0));
+    SbVec3d vec = viewer->getPointOnFocalPlane(screenPos + SbVec2s(30.0, 30.0));
     Base::Vector3d textPos(vec[0], vec[1], vec[2]);
 
     return textPos - basePoint;

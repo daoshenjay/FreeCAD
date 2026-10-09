@@ -103,6 +103,7 @@ class BSpline(DraftObject):
 
         import Part
 
+        self.anchor_far_points(obj)
         self.assureProperties(obj)
 
         self.knotSeq = self.parameterization(obj.Points, obj.Parameterization, obj.Closed)

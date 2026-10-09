@@ -115,7 +115,7 @@ long NavlibInterface::GetPointerPosition(navlib::point_t& position) const
         double scaling = inventorViewer->devicePixelRatio();
         viewPoint *= scaling;
 
-        SbVec3f worldPosition =
+        SbVec3d worldPosition =
             inventorViewer->getPointOnFocalPlane(SbVec2s(viewPoint.x(), viewPoint.y()));
         std::copy(worldPosition.getValue(), worldPosition.getValue() + 3, &position.x);
 

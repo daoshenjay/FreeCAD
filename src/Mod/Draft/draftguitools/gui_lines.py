@@ -44,6 +44,7 @@ import DraftVecUtils
 from draftgeoutils import geometry as geo_geometry
 from draftguitools import gui_base_original
 from draftguitools import gui_tool_utils
+from draftguitools import gui_trackers as trackers
 from draftutils import gui_utils
 from draftutils import params
 from draftutils import utils
@@ -232,7 +233,7 @@ class Line(gui_base_original.Creator):
                 edges = self.obj.Shape.Edges
                 if len(edges) > 1:
                     newshape = Part.makePolygon(self.node)
-                    self.obj.Shape = newshape
+                    trackers.set_preview_pose(self.obj, newshape)
                 else:
                     self.obj.ViewObject.hide()
                 # DNC: report on removal
@@ -260,17 +261,19 @@ class Line(gui_base_original.Creator):
         elif len(self.node) == 2:
             last = self.node[len(self.node) - 2]
             newseg = Part.LineSegment(last, point).toShape()
-            self.obj.Shape = newseg
+            # Pose at the shared float32 origin: absolute world vertices
+            # snap to the float32 lattice far from the origin and the
+            # preview disappears from the viewport.
+            trackers.set_preview_pose(self.obj, newseg)
             self.obj.ViewObject.Visibility = True
             if self.mode != "line":
                 _toolmsg(translate("draft", "Pick next point"))
         else:
-            currentshape = self.obj.Shape.copy()
-            last = self.node[len(self.node) - 2]
-            if not DraftVecUtils.equals(last, point):
-                newseg = Part.LineSegment(last, point).toShape()
-                newshape = currentshape.fuse(newseg)
-                self.obj.Shape = newshape
+            # Rebuild the whole polyline in world space each time: fusing
+            # the previous (already localised) shape would mix coordinate
+            # frames whenever the shared origin moves mid-command.
+            newshape = Part.makePolygon(self.node)
+            trackers.set_preview_pose(self.obj, newshape)
             _toolmsg(translate("draft", "Pick next point"))
         self.update_hints()
 

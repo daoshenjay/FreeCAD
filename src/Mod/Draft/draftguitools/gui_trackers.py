@@ -39,6 +39,7 @@ that is, previews, of the real objects that will be created on the 3D view.
 # @{
 import math
 import re
+import struct
 import pivy.coin as coin
 
 import FreeCAD
@@ -52,16 +53,354 @@ from draftutils import grid_observer
 from draftutils import gui_utils
 from draftutils import params
 from draftutils import utils
-from draftutils.messages import _msg
+from draftutils.messages import _log, _msg, _wrn
 from draftutils.todo import ToDo
+
+
+def _f32(v):
+    """Round-trip through float32, matching Coin SoSFVec3f field storage."""
+    return struct.unpack("f", struct.pack("f", float(v)))[0]
+
 
 __title__ = "FreeCAD Draft Trackers"
 __author__ = "Yorik van Havre"
 __url__ = "https://www.freecad.org"
 
+# Shared local origin for all Draft trackers (Sketcher-style reference offset).
+# Coin stores absolute world coordinates as float32; far from the origin the ULP
+# becomes metres and previews detach from the double-precision pick point.
+# Trackers store float32(world - float32(origin)) under one parent
+# SoTranslation(float32(origin)): the anchor is lattice-clean and the stored
+# offset stays viewport-sized, so the GL sum float32(origin) + local lands on
+# world + eps with eps below half the ULP of the view-local offset (sub-pixel),
+# instead of snapping to the f32 lattice of the huge world coordinate.
+_origin = Vector(0, 0, 0)
+_tracker_sg = None
+_tracker_root = None
+_tracker_body = None
+_origin_trans = None
+_origin_dependents = []
+# Last anchor logged by set_preview_pose (avoids spamming on every draw step).
+_last_pose_log_origin = None
+
+
+def get_origin():
+    """Return the shared tracker local origin (world double)."""
+    return Vector(_origin)
+
+
+def set_origin(point):
+    """Set the shared local origin and refresh trackers that cache world points."""
+    global _origin
+    new_origin = Vector(point) if point is not None else Vector(0, 0, 0)
+    if (new_origin - _origin).Length > 1e-12:
+        # PrintMessage (not PrintLog): the anchor value is the primary
+        # diagnostic for far-from-origin previews and Report View shows
+        # message-level output by default.
+        _msg(
+            "Draft tracker origin: ({0:.6f}, {1:.6f}, {2:.6f}) -> ({3:.6f}, {4:.6f}, {5:.6f})".format(
+                _origin.x,
+                _origin.y,
+                _origin.z,
+                new_origin.x,
+                new_origin.y,
+                new_origin.z,
+            )
+        )
+    _origin = new_origin
+    _sync_origin_transform()
+    for tracker in list(_origin_dependents):
+        refresh = getattr(tracker, "refresh_origin", None)
+        if refresh is not None:
+            try:
+                refresh()
+            except Exception:
+                pass
+
+
+def to_local(point):
+    """Convert a world point to tracker-local coordinates."""
+    p = Vector(point)
+    return Vector(p.x - _origin.x, p.y - _origin.y, p.z - _origin.z)
+
+
+def from_local(point):
+    """Convert a tracker-local point back to world coordinates."""
+    p = Vector(point)
+    return Vector(p.x + _origin.x, p.y + _origin.y, p.z + _origin.z)
+
+
+def from_f32_local(point):
+    """Convert a stored float32 tracker-local point back to world coordinates.
+
+    Coin fields store ``float32(world - float32(origin))``, so their anchor
+    is the float32 lattice point, not the double origin that ``to_local``
+    uses; mixing the two loses ``float32(origin) - origin`` (up to half a
+    lattice step) from the result.
+    """
+    p = Vector(point)
+    ox, oy, oz = _f32_origin_tuple()
+    return Vector(p.x + ox, p.y + oy, p.z + oz)
+
+
+def _f32_local_tuple(point):
+    """float32(world - float32(origin)) as a 3-tuple for Coin fields.
+
+    Subtracting the stored anchor float32(origin) *before* rounding keeps the
+    rounded value viewport-sized, so GL's float32(origin) + local evaluates to
+    world + eps with eps bounded by half the ULP of |world - float32(origin)|
+    (sub-pixel), not the ULP of the huge world coordinate.  When origin is
+    already f32-clean this is identical to float32(world - origin).
+    """
+    p = Vector(point)
+    ox, oy, oz = _f32(_origin.x), _f32(_origin.y), _f32(_origin.z)
+    return (_f32(p.x - ox), _f32(p.y - oy), _f32(p.z - oz))
+
+
+def _f32_origin_tuple():
+    return (_f32(_origin.x), _f32(_origin.y), _f32(_origin.z))
+
+
+def _f32_localize_coords(node):
+    """Rewrite every SoCoordinate3 point under node to shared-origin local values.
+
+    IV-exported preview geometry (writeInventor of a world-space curve)
+    carries absolute world points, which snap to the float32 lattice far
+    from the origin.  Callers run with ``local_coords=True`` so the parent
+    ``DraftOriginTransform`` carries ``float32(origin)``; subtracting the
+    anchor here makes the GL sum land on the double world point.
+    """
+    pt = getattr(node, "point", None)
+    if pt is not None and hasattr(pt, "getValues"):
+        values = [list(_f32_local_tuple(Vector(p[0], p[1], p[2]))) for p in pt.getValues()]
+        if values:
+            pt.setNum(len(values))
+            pt.setValues(0, len(values), values)
+    if hasattr(node, "getNumChildren"):
+        for i in range(node.getNumChildren()):
+            _f32_localize_coords(node.getChild(i))
+
+
+def set_preview_pose(obj, world_shape):
+    """Pose a temporary preview object for float32-safe far-from-origin display.
+
+    Coin stores the model matrix (``pcTransform``, driven by ``Placement``)
+    and the vertices as float32; at 1e9 the lattice spacing is 64 units, so
+    a preview written with absolute world vertices snaps to that lattice,
+    lands metres away from the pick point and falls outside the viewport.
+
+    The part view provider strips the shape location before writing the
+    float32 vertices and applies ``Placement`` through the float32 model
+    matrix instead, so the shape must carry *local* geometry: bake the
+    ``-float32(origin)`` shift into the geometry (``Shape.translate`` would
+    only move the location, which gets stripped) and pose the object at the
+    float32-clean anchor ``float32(origin)``.  The renderer then composes
+    ``float32(anchor) + float32(world - anchor)``, both viewport-sized and
+    float32-exact, landing on the double world coordinate within half the
+    ULP of the local offset (sub-pixel), same formula as the tracker scene
+    graph (``DraftOriginTransform``).
+
+    The shape must be built in world coordinates; ``self.node`` style input
+    lists must therefore keep storing world points.  The caller's shape is
+    not modified; the posed local copy is returned.
+    """
+    ox, oy, oz = _f32_origin_tuple()
+    shift = FreeCAD.Placement(Vector(-ox, -oy, -oz), FreeCAD.Rotation()).toMatrix()
+    local_shape = world_shape.transformGeometry(shift)
+    # Shape first: assigning it syncs Placement from the shape (identity
+    # after the bake), then the Placement poses it at the clean anchor --
+    # the reverse order would be overwritten by the Shape assignment.
+    obj.Shape = local_shape
+    obj.Placement = FreeCAD.Placement(Vector(ox, oy, oz), FreeCAD.Rotation())
+    _log_pose((ox, oy, oz), local_shape, obj)
+    return local_shape
+
+
+def _log_pose(anchor, local_shape, obj):
+    """Print the preview pose once per anchor change (Report View default).
+
+    A huge local extent together with an empty anchor means the shared
+    origin was never refreshed, which makes the float32 preview invisible.
+    """
+    global _last_pose_log_origin
+    key = tuple(anchor)
+    if _last_pose_log_origin == key:
+        return
+    _last_pose_log_origin = key
+    try:
+        bb = local_shape.BoundBox
+        extent = max(
+            abs(bb.XMin),
+            abs(bb.XMax),
+            abs(bb.YMin),
+            abs(bb.YMax),
+            abs(bb.ZMin),
+            abs(bb.ZMax),
+        )
+    except Exception:
+        extent = -1.0
+    base = obj.Placement.Base
+    text = (
+        "Draft preview pose: anchor=({0:.6f}, {1:.6f}, {2:.6f}) "
+        "origin=({3:.6f}, {4:.6f}, {5:.6f}) localExtent={6:.3f} "
+        "placement=({7:.6f}, {8:.6f}, {9:.6f})"
+    ).format(
+        anchor[0],
+        anchor[1],
+        anchor[2],
+        _origin.x,
+        _origin.y,
+        _origin.z,
+        extent,
+        base.x,
+        base.y,
+        base.z,
+    )
+    if key == (0.0, 0.0, 0.0) and extent > 1e6:
+        _wrn(text + " [anchor is (0,0,0) and local geometry is huge]")
+    else:
+        _msg(text)
+
+
+def _register_origin_dependent(tracker):
+    if tracker not in _origin_dependents:
+        _origin_dependents.append(tracker)
+
+
+def _unregister_origin_dependent(tracker):
+    if tracker in _origin_dependents:
+        _origin_dependents.remove(tracker)
+
+
+def _sync_origin_transform():
+    if _origin_trans is not None:
+        _origin_trans.translation.setValue(list(_f32_origin_tuple()))
+
+
+def _split_tracker_root(root):
+    """Return ``(root, origin_trans, body)`` for a DraftTrackerRoot node.
+
+    The fields are ``None`` when the root does not have the expected
+    structure.
+    """
+    origin_trans = None
+    body = None
+    for i in range(root.getNumChildren()):
+        child = root.getChild(i)
+        # pivy reports type names without the "So" prefix ("Translation").
+        type_name = str(child.getTypeId().getName())
+        if type_name.startswith("So"):
+            type_name = type_name[2:]
+        if origin_trans is None and type_name == "Translation":
+            origin_trans = child
+        elif body is None and type_name == "Separator":
+            body = child
+    return root, origin_trans, body
+
+
+def _find_tracker_root(sg):
+    """Return the newest valid ``(root, origin_trans, body)`` triple under sg.
+
+    ``getSceneGraph()`` hands out a fresh Python wrapper per call, so
+    comparing wrappers with ``is`` rebuilds DraftTrackerRoot on every
+    insert: the new root becomes the global one while earlier switches stay
+    in orphaned roots whose origin transform freezes at its creation value,
+    and once the shared origin moves those previews render at the stale
+    world position and disappear.  Search by node name instead.
+    """
+    if sg is None:
+        return None
+    found = None
+    for i in range(sg.getNumChildren()):
+        child = sg.getChild(i)
+        if str(child.getName()) != "DraftTrackerRoot":
+            continue
+        root, origin_trans, body = _split_tracker_root(child)
+        if origin_trans is not None and body is not None:
+            found = (root, origin_trans, body)
+    return found
+
+
+def _find_switch_parent(sg, switch):
+    """Locate the node that directly parents ``switch``, or ``None``."""
+    if _tracker_body is not None and _tracker_body.findChild(switch) >= 0:
+        return _tracker_body
+    if sg is not None and sg.findChild(switch) >= 0:
+        return sg
+    if sg is not None:
+        for i in range(sg.getNumChildren()):
+            child = sg.getChild(i)
+            if str(child.getName()) != "DraftTrackerRoot":
+                continue
+            _, _, other_body = _split_tracker_root(child)
+            if other_body is not None and other_body.findChild(switch) >= 0:
+                return other_body
+    if _tracker_root is not None and _tracker_root.findChild(switch) >= 0:
+        return _tracker_root
+    return None
+
+
+def _rehome_origin_dependents(sg):
+    """Move every local-coords switch into the current body.
+
+    A switch stranded in an older root keeps that root's frozen
+    DraftOriginTransform, so once the shared origin moves it renders at the
+    stale position.  Legacy (world-coordinate) trackers mount directly on
+    the view root and must not be moved under the origin transform.
+    """
+    for tracker in list(_origin_dependents):
+        if not getattr(tracker, "local_coords", False):
+            continue
+        switch = getattr(tracker, "switch", None)
+        if switch is None:
+            continue
+        parent = _find_switch_parent(sg, switch)
+        if parent is None or parent is _tracker_body:
+            continue
+        parent.removeChild(switch)
+        if getattr(tracker, "ontop", False):
+            _tracker_body.insertChild(switch, 0)
+        else:
+            _tracker_body.addChild(switch)
+        refresh = getattr(tracker, "refresh_origin", None)
+        if refresh is not None:
+            try:
+                refresh()
+            except Exception:
+                pass
+
+
+def _ensure_tracker_nodes(sg):
+    """Get or create DraftTrackerRoot / origin transform / body under sg."""
+    global _tracker_sg, _tracker_root, _tracker_body, _origin_trans
+    existing = _find_tracker_root(sg)
+    if existing is None:
+        _tracker_root = coin.SoSeparator()
+        _tracker_root.setName("DraftTrackerRoot")
+        _origin_trans = coin.SoTranslation()
+        _origin_trans.setName("DraftOriginTransform")
+        _origin_trans.translation.setValue(list(_f32_origin_tuple()))
+        _tracker_body = coin.SoSeparator()
+        _tracker_body.setName("DraftTrackerBody")
+        _tracker_root.addChild(_origin_trans)
+        _tracker_root.addChild(_tracker_body)
+        sg.addChild(_tracker_root)
+    else:
+        _tracker_root, _origin_trans, _tracker_body = existing
+        # An adopted root may predate a later set_origin call.
+        _sync_origin_transform()
+    _tracker_sg = sg
+    _rehome_origin_dependents(sg)
+    return _tracker_body
+
 
 class Tracker:
     """A generic Draft Tracker, to be used by other specific trackers."""
+
+    # True: mount under DraftOriginTransform and store world-relative local coords.
+    # False: mount directly on the view root and keep absolute world coordinates
+    # (legacy behaviour for grid/plane trackers that already carry their own pose).
+    local_coords = False
 
     def __init__(self, dotted=False, scolor=None, swidth=None, children=[], ontop=False, name=None):
         global Part
@@ -86,14 +425,20 @@ class Tracker:
         self.switch.whichChild = -1
         self.setColor(scolor)
         self.Visible = False
+        self._mount_queued = True
+        _register_origin_dependent(self)
         ToDo.delay(self._insertSwitch, self.switch)
 
     def finalize(self):
         """Finish the command by removing the switch.
         Also called by ghostTracker.remove.
         """
+        _unregister_origin_dependent(self)
         ToDo.delay(self._removeSwitch, self.switch)
         self.switch = None
+
+    def refresh_origin(self):
+        """Rewrite Coin fields after the shared local origin changes."""
 
     def get_scene_graph(self):
         """Returns the current scenegraph or None if this is not a 3D view"""
@@ -106,38 +451,76 @@ class Tracker:
     def _insertSwitch(self, switch):
         """Insert self.switch into the scene graph.
 
+        Trackers with local_coords=True go under DraftTrackerRoot/DraftOriginTransform;
+        others mount directly on the view root (legacy absolute placement).
+
         Must not be called
         from an event handler (or other scene graph traversal).
         """
+        self._mount_queued = False
         sg = self.get_scene_graph()
         if not sg:
+            # No active view yet: Tracker.on() requeues the insert later.
+            return
+        if not self.local_coords:
+            if sg.findChild(switch) >= 0:
+                return
+            if self.ontop:
+                sg.insertChild(switch, 0)
+            else:
+                sg.addChild(switch)
+            return
+        body = _ensure_tracker_nodes(sg)
+        # _rehome_origin_dependents may already have moved a stranded switch.
+        if body.findChild(switch) >= 0:
             return
         if self.ontop:
-            sg.insertChild(switch, 0)
+            body.insertChild(switch, 0)
         else:
-            sg.addChild(switch)
+            body.addChild(switch)
 
     def _removeSwitch(self, switch):
-        """Remove self.switch from the scene graph.
+        """Remove self.switch from its parent node.
 
         As with _insertSwitch,
         must not be called during scene graph traversal).
         """
-        sg = self.get_scene_graph()
-        if not sg:
+        if switch is None:
             return
-        if sg.findChild(switch) >= 0:
-            sg.removeChild(switch)
+        parent = _find_switch_parent(self.get_scene_graph(), switch)
+        if parent is not None:
+            parent.removeChild(switch)
 
     def on(self):
         """Set the visibility to True."""
+        if self.switch is None:
+            return
+        if self._needs_mount() and not self._mount_queued:
+            # The first insert may have run without an active view, or the
+            # switch may sit in an orphaned root; retry so the tracker is
+            # actually reachable when shown.
+            self._mount_queued = True
+            ToDo.delay(self._insertSwitch, self.switch)
         self.switch.whichChild = 0
         self.Visible = True
+
+    def _needs_mount(self):
+        """True when this tracker's switch is not under its expected parent."""
+        if self.local_coords:
+            return _tracker_body is None or _tracker_body.findChild(self.switch) < 0
+        sg = self.get_scene_graph()
+        return sg is None or sg.findChild(self.switch) < 0
 
     def off(self):
         """Set the visibility to False."""
         self.switch.whichChild = -1
         self.Visible = False
+
+    def _tracker_parent(self):
+        """Return the node that actually parents this switch (body or root)."""
+        if self.switch is None:
+            return None
+        return _find_switch_parent(self.get_scene_graph(), self.switch)
 
     def lowerTracker(self):
         """Lower the tracker to the bottom of the scenegraph.
@@ -145,11 +528,11 @@ class Tracker:
         So it doesn't obscure the other objects.
         """
         if self.switch:
-            sg = self.get_scene_graph()
-            if not sg:
+            parent = self._tracker_parent()
+            if not parent:
                 return
-            sg.removeChild(self.switch)
-            sg.addChild(self.switch)
+            parent.removeChild(self.switch)
+            parent.addChild(self.switch)
 
     def raiseTracker(self):
         """Raise the tracker to the top of the scenegraph.
@@ -157,11 +540,15 @@ class Tracker:
         So it obscures the other objects.
         """
         if self.switch:
-            sg = self.get_scene_graph()
-            if not sg:
+            parent = self._tracker_parent()
+            if not parent:
                 return
-            sg.removeChild(self.switch)
-            sg.insertChild(self.switch, 0)
+            parent.removeChild(self.switch)
+            # Keep DraftOriginTransform as child 0 of DraftTrackerRoot.
+            index = 0 if parent is _tracker_body else 0
+            if parent is _tracker_root:
+                index = 1 if _origin_trans is not None else 0
+            parent.insertChild(self.switch, index)
 
     def setColor(self, color=None):
         """Set the color."""
@@ -186,6 +573,8 @@ class Tracker:
 class snapTracker(Tracker):
     """Define Snap Mark tracker, used by tools that support snapping."""
 
+    local_coords = True
+
     def __init__(self):
         self.marker = coin.SoMarkerSet()  # this is the marker symbol
         self.marker.markerIndex = FreeCADGui.getMarkerIndex(
@@ -193,6 +582,7 @@ class snapTracker(Tracker):
         )
         self.coords = coin.SoCoordinate3()  # this is the coordinate
         self.coords.point.setValue((0, 0, 0))
+        self._world_points = []
         node = coin.SoAnnotation()
         node.addChild(self.coords)
         node.addChild(self.marker)
@@ -212,56 +602,83 @@ class snapTracker(Tracker):
         else:
             self.color.rgb = color
 
+    def _write_local_points(self):
+        values = [_f32_local_tuple(p) for p in self._world_points]
+        if not values:
+            self.coords.point.deleteValues(0)
+            return
+        self.coords.point.setValues(0, values)
+
     def setCoords(self, point):
         """Set the coordinates to the point."""
-        self.coords.point.setValue((point.x, point.y, point.z))
+        self._world_points = [Vector(point)]
+        self._write_local_points()
 
     def addCoords(self, point):
         """Add the point to the current point."""
-        l = self.coords.point.getValues()
-        l.append(coin.SbVec3f(point.x, point.y, point.z))
-        self.coords.point.setValues(l)
+        self._world_points.append(Vector(point))
+        self._write_local_points()
+
+    def refresh_origin(self):
+        if self._world_points:
+            self._write_local_points()
 
     def clear(self):
         """Delete the values of the point."""
+        self._world_points = []
         self.coords.point.deleteValues(0)
 
 
 class lineTracker(Tracker):
     """A Line tracker, used by the tools that need to draw temporary lines"""
 
+    local_coords = True
+
     def __init__(self, dotted=False, scolor=None, swidth=None, ontop=False):
         line = coin.SoLineSet()
         line.numVertices.setValue(2)
-        self.coords = coin.SoCoordinate3()  # this is the coordinate
+        self.coords = coin.SoCoordinate3()  # endpoints, shared-origin local coords
         self.coords.point.setValues(0, 2, [[0, 0, 0], [1, 0, 0]])
+        self._p1 = Vector(0, 0, 0)
+        self._p2 = Vector(1, 0, 0)
         super().__init__(dotted, scolor, swidth, [self.coords, line], ontop, name="lineTracker")
+
+    def _update(self):
+        self.coords.point.set1Value(0, *_f32_local_tuple(self._p1))
+        self.coords.point.set1Value(1, *_f32_local_tuple(self._p2))
+
+    def refresh_origin(self):
+        self._update()
 
     def p1(self, point=None):
         """Set or get the first point of the line."""
-        if point:
-            if self.coords.point.getValues()[0].getValue() != tuple(point):
-                self.coords.point.set1Value(0, point.x, point.y, point.z)
+        if point is not None:
+            new = Vector(point)
+            if new != self._p1:
+                self._p1 = new
+                self._update()
         else:
-            return Vector(self.coords.point.getValues()[0].getValue())
+            return Vector(self._p1)
 
     def p2(self, point=None):
         """Set or get the second point of the line."""
-        if point:
-            if self.coords.point.getValues()[-1].getValue() != tuple(point):
-                self.coords.point.set1Value(1, point.x, point.y, point.z)
+        if point is not None:
+            new = Vector(point)
+            if new != self._p2:
+                self._p2 = new
+                self._update()
         else:
-            return Vector(self.coords.point.getValues()[-1].getValue())
+            return Vector(self._p2)
 
     def getLength(self):
         """Return the length of the line."""
-        p1 = Vector(self.coords.point.getValues()[0].getValue())
-        p2 = Vector(self.coords.point.getValues()[-1].getValue())
-        return (p2.sub(p1)).Length
+        return (self._p2 - self._p1).Length
 
 
 class polygonTracker(Tracker):
     """A Polygon tracker, used by the polygon tool."""
+
+    local_coords = True
 
     def __init__(self, dotted=False, scolor=None, swidth=None, face=False, sides=None):
         self.origin = Vector(0, 0, 0)
@@ -295,6 +712,8 @@ class polygonTracker(Tracker):
         self.sides = num
 
     def _drawPolygon(self, origin, radius):
+        self._last_origin = Vector(origin)
+        self._last_radius = radius
         wp = self._get_wp()
         local_origin = wp.get_local_coords(origin)
         for i in range(self.sides):
@@ -302,13 +721,18 @@ class polygonTracker(Tracker):
             px = local_origin.x + radius * math.cos(angle)
             py = local_origin.y + radius * math.sin(angle)
 
-            # Back to global space
+            # Back to global space, stored float32-local to the shared origin
             global_point = wp.get_global_coords(Vector(px, py, 0))
-            self.coords.point.set1Value(i, *global_point)
+            self.coords.point.set1Value(i, *_f32_local_tuple(global_point))
 
         # Close the polygon by repeating the first point
         first = self.coords.point[0].getValue()
         self.coords.point.set1Value(self.sides, *first)
+
+    def refresh_origin(self):
+        """Redraw from the cached world inputs after the shared origin moves."""
+        if getattr(self, "_last_origin", None) is not None:
+            self._drawPolygon(self._last_origin, self._last_radius)
 
     def setOrigin(self, point, radius=1.0):
         """Set the origin of the polygon and initialize the shape."""
@@ -325,8 +749,11 @@ class polygonTracker(Tracker):
 class rectangleTracker(Tracker):
     """A Rectangle tracker, used by the rectangle tool."""
 
+    local_coords = True
+
     def __init__(self, dotted=False, scolor=None, swidth=None, face=False):
         self.origin = Vector(0, 0, 0)
+        self._last_point = None
         line = coin.SoLineSet()
         line.numVertices.setValue(5)
         self.coords = coin.SoCoordinate3()  # this is the coordinate
@@ -354,8 +781,9 @@ class rectangleTracker(Tracker):
 
     def setorigin(self, point):
         """Set the base point of the rectangle."""
-        self.coords.point.set1Value(0, point.x, point.y, point.z)
-        self.coords.point.set1Value(4, point.x, point.y, point.z)
+        local = _f32_local_tuple(point)
+        self.coords.point.set1Value(0, *local)
+        self.coords.point.set1Value(4, *local)
         self.origin = point
 
     def update(self, point):
@@ -363,9 +791,16 @@ class rectangleTracker(Tracker):
         diagonal = point.sub(self.origin)
         inpoint1 = self.origin.add(DraftVecUtils.project(diagonal, self.v))
         inpoint2 = self.origin.add(DraftVecUtils.project(diagonal, self.u))
-        self.coords.point.set1Value(1, inpoint1.x, inpoint1.y, inpoint1.z)
-        self.coords.point.set1Value(2, point.x, point.y, point.z)
-        self.coords.point.set1Value(3, inpoint2.x, inpoint2.y, inpoint2.z)
+        self.coords.point.set1Value(1, *_f32_local_tuple(inpoint1))
+        self.coords.point.set1Value(2, *_f32_local_tuple(point))
+        self.coords.point.set1Value(3, *_f32_local_tuple(inpoint2))
+        self._last_point = Vector(point)
+
+    def refresh_origin(self):
+        """Rewrite the corners after the shared origin moves (world inputs cached)."""
+        self.setorigin(self.origin)
+        if self._last_point is not None:
+            self.update(self._last_point)
 
     def setPlane(self, u, v=None):
         """Set given (u,v) vectors as working plane.
@@ -385,22 +820,22 @@ class rectangleTracker(Tracker):
         if point:
             self.setorigin(point)
         else:
-            return Vector(self.coords.point.getValues()[0].getValue())
+            return from_f32_local(self.coords.point.getValues()[0].getValue())
 
     def p2(self):
         """Get the second point (on u axis) of the rectangle."""
-        return Vector(self.coords.point.getValues()[3].getValue())
+        return from_f32_local(self.coords.point.getValues()[3].getValue())
 
     def p3(self, point=None):
         """Set or get the opposite (diagonal) point of the rectangle."""
         if point:
             self.update(point)
         else:
-            return Vector(self.coords.point.getValues()[2].getValue())
+            return from_f32_local(self.coords.point.getValues()[2].getValue())
 
     def p4(self):
         """Get the fourth point (on v axis) of the rectangle."""
-        return Vector(self.coords.point.getValues()[1].getValue())
+        return from_f32_local(self.coords.point.getValues()[1].getValue())
 
     def getSize(self):
         """Return (length, width) of the rectangle."""
@@ -434,6 +869,8 @@ class rectangleTracker(Tracker):
 class dimTracker(Tracker):
     """A Dimension tracker, used by the dimension tool."""
 
+    local_coords = True
+
     def __init__(self, dotted=False, scolor=None, swidth=None):
         line = coin.SoLineSet()
         line.numVertices.setValue(4)
@@ -466,12 +903,12 @@ class dimTracker(Tracker):
         import Part
 
         if (self.p1 is not None) and (self.p2 is not None):
-            # fmt: off
-            points = [DraftVecUtils.tup(self.p1, True),
-                      DraftVecUtils.tup(self.p2, True),
-                      DraftVecUtils.tup(self.p1, True),
-                      DraftVecUtils.tup(self.p2, True)]
-            # fmt: on
+            points = [
+                _f32_local_tuple(self.p1),
+                _f32_local_tuple(self.p2),
+                _f32_local_tuple(self.p1),
+                _f32_local_tuple(self.p2),
+            ]
             if self.p3 is not None:
                 p1 = self.p1
                 p4 = self.p2
@@ -486,17 +923,22 @@ class dimTracker(Tracker):
                 else:
                     p2 = p1.add(proj.negative())
                     p3 = p4.add(proj.negative())
-                # fmt: off
-                points = [DraftVecUtils.tup(p1),
-                          DraftVecUtils.tup(p2),
-                          DraftVecUtils.tup(p3),
-                          DraftVecUtils.tup(p4)]
-                # fmt: on
+                points = [
+                    _f32_local_tuple(p1),
+                    _f32_local_tuple(p2),
+                    _f32_local_tuple(p3),
+                    _f32_local_tuple(p4),
+                ]
             self.coords.point.setValues(0, 4, points)
+
+    def refresh_origin(self):
+        self.calc()
 
 
 class bsplineTracker(Tracker):
     """A bspline tracker."""
+
+    local_coords = True
 
     def __init__(self, dotted=False, scolor=None, swidth=None, points=[]):
         self.bspline = None
@@ -568,10 +1010,18 @@ class bsplineTracker(Tracker):
                     FreeCAD.Console.PrintWarning(
                         "bsplineTracker.recompute() failed to read-in Inventor string\n"
                     )
+        if self.bspline is not None:
+            _f32_localize_coords(self.bspline)
+
+    def refresh_origin(self):
+        """Re-export the world-space curve after the shared origin moves."""
+        self.recompute()
 
 
 class bezcurveTracker(Tracker):
     """A bezcurve tracker."""
+
+    local_coords = True
 
     def __init__(self, dotted=False, scolor=None, swidth=None, points=[]):
         self.bezcurve = None
@@ -650,10 +1100,18 @@ class bezcurveTracker(Tracker):
                             "bezcurveTracker.recompute() failed to read-in Inventor string\n"
                         )
                 self.bezcurve.append(bezcurveseg)
+        for seg in self.bezcurve:
+            _f32_localize_coords(seg)
+
+    def refresh_origin(self):
+        """Re-export the world-space curve after the shared origin moves."""
+        self.recompute()
 
 
 class arcTracker(Tracker):
     """An arc tracker."""
+
+    local_coords = True
 
     # Note: used by the Arc command but also for angular dimensions.
     def __init__(self, dotted=False, scolor=None, swidth=None, start=0, end=math.pi * 2):
@@ -665,6 +1123,11 @@ class arcTracker(Tracker):
         self.sep = coin.SoSeparator()
         self.autoinvert = True
         self.normal = self._get_wp().axis
+        self._center = Vector(0, 0, 0)
+        self._radius = 0.0
+        # Coin default scaleFactor is (1,1,1); recompute() builds a unit circle.
+        # Hide it until setRadius() runs so step0 arctrack.on() shows no small circle.
+        self.trans.scaleFactor.setValue([0, 0, 0])
         self.recompute()
         super().__init__(dotted, scolor, swidth, [self.trans, self.sep], name="arcTracker")
 
@@ -676,16 +1139,41 @@ class arcTracker(Tracker):
         return c.Vertexes[0].Point
 
     def setCenter(self, cen):
-        """Set the center point."""
-        self.trans.translation.setValue([cen.x, cen.y, cen.z])
+        """Set the center point (world double; Coin stores float32(world - anchor))."""
+        self._center = Vector(cen)
+        self.trans.translation.setValue(list(_f32_local_tuple(self._center)))
+
+    def centerF32(self):
+        """Return the world center as rendered (float32 origin + local).
+
+        Approximates the double-precision center: the anchor float32(origin) is
+        lattice-clean and the local offset is viewport-sized, so the residual
+        error is bounded by half the ULP of that offset (sub-pixel) rather than
+        the ULP of the huge world coordinate.
+        """
+        t = self.trans.translation.getValue()
+        return Vector(
+            _f32(_origin.x) + t[0],
+            _f32(_origin.y) + t[1],
+            _f32(_origin.z) + t[2],
+        )
+
+    def refresh_origin(self):
+        if self._center is not None:
+            self.setCenter(self._center)
+
+    def setRadiusFromPoint(self, point):
+        """Set radius so the rendered circle passes through point."""
+        self.setRadius((Vector(point) - self.centerF32()).Length)
 
     def setRadius(self, rad):
         """Set the radius."""
+        self._radius = float(rad)
         self.trans.scaleFactor.setValue([rad, rad, rad])
 
     def getRadius(self):
         """Return the current radius."""
-        return self.trans.scaleFactor.getValue()[0]
+        return self._radius
 
     def setStartAngle(self, ang):
         """Set the start angle."""
@@ -699,9 +1187,7 @@ class arcTracker(Tracker):
 
     def getAngle(self, pt):
         """Return the angle of a given vector in radians."""
-        c = self.trans.translation.getValue()
-        center = Vector(c[0], c[1], c[2])
-        return DraftVecUtils.angle(pt.sub(center), self.getDeviation(), self.normal)
+        return DraftVecUtils.angle(pt - self._center, self.getDeviation(), self.normal)
 
     def getAngles(self):
         """Return the start and end angles in degrees."""
@@ -748,7 +1234,7 @@ class arcTracker(Tracker):
             c = Part.makeCircle(1, Vector(0, 0, 0), self.normal, self.endangle, self.startangle)
         else:
             c = Part.makeCircle(1, Vector(0, 0, 0), self.normal, self.startangle, self.endangle)
-        buf = c.writeInventor(2, 0.01)
+        buf = c.writeInventor(2, 1e-4, 0.05)
         try:
             ivin = coin.SoInput()
             ivin.setBuffer(buf)
@@ -1049,6 +1535,8 @@ class editTracker(Tracker):
 class PlaneTracker(Tracker):
     """A working plane tracker."""
 
+    local_coords = True
+
     def __init__(self):
         # getting screen distance
         p1 = gui_utils.get_3d_view().getPoint((100, 100))
@@ -1100,9 +1588,19 @@ class PlaneTracker(Tracker):
         Q = plm.Rotation.Q
         if pos is None:
             pos = plm.Base
-        self.trans.translation.setValue([pos.x, pos.y, pos.z])
+        self._last_pos = Vector(pos)
+        # Local to the shared origin: a raw world translation would snap to
+        # the float32 lattice far from the origin (the plane marker would
+        # drift out of the viewport); DraftOriginTransform carries the anchor.
+        self.trans.translation.setValue(list(_f32_local_tuple(pos)))
         self.trans.rotation.setValue([Q[0], Q[1], Q[2], Q[3]])
         self.on()
+
+    def refresh_origin(self):
+        """Re-anchor after the shared origin moves (world pose cached)."""
+        pos = getattr(self, "_last_pos", None)
+        if pos is not None:
+            self.trans.translation.setValue(list(_f32_local_tuple(pos)))
 
 
 class wireTracker(Tracker):

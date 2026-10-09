@@ -765,6 +765,23 @@ class Snapper:
                                 self.tracker.setMarker(self.mk["grid"])
                                 self.tracker.on()
                             self.setCursor("grid")
+                            from draftutils.messages import _log
+
+                            _log(
+                                "Draft snapToGrid: from=({0:.6f}, {1:.6f}, {2:.6f}) "
+                                "to=({3:.6f}, {4:.6f}, {5:.6f}) delta={6:.6g} "
+                                "radius={7:.6g} space={8}".format(
+                                    point.x,
+                                    point.y,
+                                    point.z,
+                                    np.x,
+                                    np.y,
+                                    np.z,
+                                    dv.Length,
+                                    self.radius,
+                                    getattr(self.grid, "space", "?"),
+                                )
+                            )
                             return np
         return point
 

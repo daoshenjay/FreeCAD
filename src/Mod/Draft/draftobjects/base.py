@@ -31,6 +31,20 @@
 ## \addtogroup draftobjects
 # @{
 
+import struct
+
+import FreeCAD as App
+
+# Beyond this magnitude the float32 vertex lattice step (x * 2**-23) is
+# already about 0.008 units, coarse enough to visibly collapse fine
+# geometry such as a spline drawn far from the origin.
+_FAR_ANCHOR_THRESHOLD = 2**16
+
+
+def _f32(value):
+    """Round-trip through float32, matching Coin SoSFVec3f field storage."""
+    return struct.unpack("f", struct.pack("f", float(value)))[0]
+
 
 class DraftObject(object):
     """The base class for Draft objects.
@@ -85,6 +99,56 @@ class DraftObject(object):
     def onDocumentRestored(self, obj):
         # Object properties are updated when the document is opened.
         self.props_changed_clear()
+        if self._far_anchor_candidate(obj) is not None:
+            # The stored Shape still holds the collapsed world-space
+            # vertices; anchor_far_points rewrites the data and execute
+            # rebuilds the Shape, so only mark the object here.
+            obj.touch()
+
+    def _far_anchor_candidate(self, obj):
+        """Return the far reference point, or None when no anchor is needed.
+
+        Only Points-driven geometry with an identity Placement qualifies:
+        a non-identity Placement already localizes the stored shape
+        vertices, a Base link replaces the geometry wholesale, and a
+        MapMode placement owns the Placement and must not be overwritten.
+        """
+        if not hasattr(obj, "Points") or not obj.Points:
+            return None
+        if getattr(obj, "Base", None):
+            return None
+        if getattr(obj, "MapMode", "Deactivated") not in ("Deactivated", None):
+            return None
+        if not (obj.Placement == App.Placement()):
+            return None
+        for p in obj.Points:
+            if max(abs(p.x), abs(p.y), abs(p.z)) >= _FAR_ANCHOR_THRESHOLD:
+                return p
+        return None
+
+    def anchor_far_points(self, obj):
+        """Pose far-from-origin Points as local geometry with a Placement anchor.
+
+        The part view provider strips the shape location and stores the
+        vertices as float32, so absolute world vertices snap to the
+        float32 lattice (64 units at 1e9) and a small curve collapses
+        into a single cell. Migrating to local Points plus a
+        float32-clean Placement anchor keeps every stored addend
+        viewport-sized; the view provider's vertex mirror re-applies the
+        anchor's sub-lattice remainder, landing the rendered result on
+        the double-precision world coordinates again.
+
+        This restores the invariant make_wire already establishes with a
+        placement (Points are local to Placement), which the Draft
+        modify functions assume. Returns True when the data changed.
+        """
+        ref = self._far_anchor_candidate(obj)
+        if ref is None:
+            return False
+        anchor = App.Vector(_f32(ref.x), _f32(ref.y), _f32(ref.z))
+        obj.Points = [p.sub(anchor) for p in obj.Points]
+        obj.Placement = App.Placement(anchor, App.Rotation())
+        return True
 
     def dumps(self):
         """Return a tuple of all serializable objects or None.

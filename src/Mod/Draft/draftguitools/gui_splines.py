@@ -139,7 +139,7 @@ class BSpline(gui_lines.Line):
             self.bsplinetrack.update(self.node)
             spline = Part.BSplineCurve()
             spline.interpolate(self.node, False)
-            self.obj.Shape = spline.toShape()
+            trackers.set_preview_pose(self.obj, spline.toShape())
             self.update_hints()
 
     def drawUpdate(self, point):
@@ -154,7 +154,8 @@ class BSpline(gui_lines.Line):
         else:
             spline = Part.BSplineCurve()
             spline.interpolate(self.node, False)
-            self.obj.Shape = spline.toShape()
+            # World-space build, then float32-safe pose (see set_preview_pose).
+            trackers.set_preview_pose(self.obj, spline.toShape())
             _toolmsg(translate("draft", "Pick next point"))
         self.update_hints()
 

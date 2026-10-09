@@ -146,7 +146,7 @@ class BezCurve(gui_lines.Line):
         if len(self.node) > 1:
             self.node.pop()
             self.bezcurvetrack.update(self.node, degree=self.degree)
-            self.obj.Shape = self.updateShape(self.node)
+            trackers.set_preview_pose(self.obj, self.updateShape(self.node))
             self.update_hints()
 
     def drawUpdate(self, point):
@@ -157,7 +157,8 @@ class BezCurve(gui_lines.Line):
                 self.planetrack.set(self.node[0])
             _toolmsg(translate("draft", "Pick next point"))
         else:
-            self.obj.Shape = self.updateShape(self.node)
+            # World-space build, then float32-safe pose (set_preview_pose).
+            trackers.set_preview_pose(self.obj, self.updateShape(self.node))
             _toolmsg(translate("draft", "Pick next point"))
         self.update_hints()
 
@@ -391,7 +392,7 @@ class CubicBezCurve(gui_lines.Line):
         if len(self.node) > 1:
             self.node.pop()
             self.bezcurvetrack.update(self.node, degree=self.degree)
-            self.obj.Shape = self.updateShape(self.node)
+            trackers.set_preview_pose(self.obj, self.updateShape(self.node))
             self.update_hints()
 
     def drawUpdate(self, point):
@@ -403,7 +404,7 @@ class CubicBezCurve(gui_lines.Line):
             _toolmsg(translate("draft", "Click and drag to define next knot"))
         elif (len(self.node) - 1) % self.degree == 1 and len(self.node) > 2:
             # is a knot
-            self.obj.Shape = self.updateShape(self.node[:-1])
+            trackers.set_preview_pose(self.obj, self.updateShape(self.node[:-1]))
             _toolmsg(translate("draft", "Click and drag to define next knot"))
         self.update_hints()
 

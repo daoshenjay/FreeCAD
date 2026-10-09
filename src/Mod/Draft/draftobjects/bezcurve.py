@@ -136,6 +136,7 @@ class BezCurve(DraftObject):
     def createGeometry(self, fp):
         import Part
 
+        self.anchor_far_points(fp)
         plm = fp.Placement
         if fp.Points:
             startpoint = fp.Points[0]

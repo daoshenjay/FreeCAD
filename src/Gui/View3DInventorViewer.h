@@ -35,6 +35,7 @@
 
 #include <Inventor/SbRotation.h>
 #include <Inventor/SbTime.h>
+#include <Inventor/SbVec3d.h>
 #include <Inventor/nodes/SoEnvironment.h>
 #include <Inventor/nodes/SoEventCallback.h>
 #include <Inventor/nodes/SoRotation.h>
@@ -426,14 +427,16 @@ public:
     /** Returns the orientation of the camera. */
     SbRotation getCameraOrientation() const;
 
-    /** Returns the 3d point on the focal plane to the given 2d point. */
-    SbVec3f getPointOnFocalPlane(const SbVec2s&) const;
+    /** Returns the 3d point on the focal plane to the given 2d point.
+     * Computed in double precision to avoid float32 ULP quantization far from the origin.
+     */
+    SbVec3d getPointOnFocalPlane(const SbVec2s&) const;
 
     /** Returns the 3d point on a line to the given 2d point. */
-    SbVec3f getPointOnLine(const SbVec2s&, const SbVec3f& axisCenter, const SbVec3f& axis) const;
+    SbVec3d getPointOnLine(const SbVec2s&, const SbVec3d& axisCenter, const SbVec3d& axis) const;
 
     /** Returns the 3d point on the XY plane of a placement to the given 2d point. */
-    SbVec3f getPointOnXYPlaneOfPlacement(const SbVec2s&, const Base::Placement&) const;
+    SbVec3d getPointOnXYPlaneOfPlacement(const SbVec2s&, const Base::Placement&) const;
 
     /** Returns the bounding box on the XY plane of a placement to the given 2d point. */
     Base::BoundBox2d getViewportOnXYPlaneOfPlacement(Base::Placement plc) const;
@@ -469,13 +472,13 @@ public:
     bool hasClippingPlane() const;
 
     /** Project the given normalized 2d point onto the near plane */
-    SbVec3f projectOnNearPlane(const SbVec2f&) const;
+    SbVec3d projectOnNearPlane(const SbVec2f&) const;
 
     /** Project the given normalized 2d point onto the far plane */
-    SbVec3f projectOnFarPlane(const SbVec2f&) const;
+    SbVec3d projectOnFarPlane(const SbVec2f&) const;
 
     /** Project the given 2d point to a line */
-    void projectPointToLine(const SbVec2s&, SbVec3f& pt1, SbVec3f& pt2) const;
+    void projectPointToLine(const SbVec2s&, SbVec3d& pt1, SbVec3d& pt2) const;
 
     /** Get the normalized position of the 2d point. */
     SbVec2f getNormalizedPosition(const SbVec2s&) const;

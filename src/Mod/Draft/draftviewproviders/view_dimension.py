@@ -50,6 +50,7 @@ from draftutils import gui_utils
 from draftutils import params
 from draftutils import units
 from draftutils import utils
+from draftviewproviders.view_base import _f32
 from draftviewproviders.view_draft_annotation import ViewProviderDraftAnnotation
 
 # Delay import of module until first use because it is heavy
@@ -116,8 +117,61 @@ class ViewProviderDimensionBase(ViewProviderDraftAnnotation):
                      .label_scr.textpos
                                .textcolor
                                .font
-                               .text_scr
+                                .text_scr
     """
+
+    def _attach_precision_offset(self, vobj):
+        """Insert the root anchor node that carries the sub-lattice offset.
+
+        Coin stores scene graph translations in single precision: at 1e9
+        the float32 lattice spacing is 64 units, so world coordinates
+        written directly into SoTransform/SoCoordinate3 fields snap onto
+        the same lattice the grid nodes sit on.  The dimension viewprovider
+        keeps a ``SoTranslation`` anchor in the root node (before the
+        display mode switch) that carries ``float32(p2)``; every value
+        written below it is stored as ``p - float32(p2)``.  The renderer
+        composes the view and anchor matrices first (their large
+        translations cancel there), so the small remainders multiply in
+        afterwards and survive; the geometry then lands on the exact
+        double precision world position.
+        """
+        if not App.GuiUp:
+            return
+        root = vobj.RootNode
+        if root is None or not hasattr(root, "getNumChildren"):
+            return
+        node = gui_utils.find_coin_node_by_name(root, "PrecisionCoordOffset")
+        if node is None:
+            node = coin.SoTranslation()
+            node.setName("PrecisionCoordOffset")
+            # Insert directly after the placement transform so the anchor
+            # applies to both display modes and everything below them.
+            index = 1 if root.getNumChildren() > 1 else root.getNumChildren()
+            root.insertChild(node, index)
+        self._precision_offset = node
+        self._anchor = App.Vector(0, 0, 0)
+
+    def _set_precision_anchor(self, p):
+        """Refresh the root anchor from a double precision world point."""
+        anchor = App.Vector(_f32(p.x), _f32(p.y), _f32(p.z))
+        self._anchor = anchor
+        node = getattr(self, "_precision_offset", None)
+        if node is not None:
+            node.translation.setValue(anchor.x, anchor.y, anchor.z)
+
+    def _local_tuple(self, p):
+        """Return the float32-local coordinates of a world point."""
+        a = getattr(self, "_anchor", None)
+        if a is None:
+            return (p.x, p.y, p.z)
+        return (p.x - a.x, p.y - a.y, p.z - a.z)
+
+    def _local_seq(self, pt):
+        """Return the float32-local coordinates of a world coordinate sequence."""
+        a = getattr(self, "_anchor", None)
+        if a is None:
+            return (pt[0], pt[1], pt[2])
+        return (pt[0] - a.x, pt[1] - a.y, pt[2] - a.z)
 
     def set_text_properties(self, vobj, properties):
         """Set text properties only if they don't already exist."""
@@ -248,7 +302,7 @@ class ViewProviderLinearDimension(ViewProviderDimensionBase):
         self.text_wld.string = "d"
         self.text_scr.string = "d"
         self.text_wld.justification = coin.SoAsciiText.CENTER
-        self.text_scr.justification = coin.SoAsciiText.CENTER
+        self.text_scr.justification = coin.SoText2.CENTER
 
         label_wld = coin.SoSeparator()
         label_wld.addChild(self.textpos)
@@ -309,6 +363,7 @@ class ViewProviderLinearDimension(ViewProviderDimensionBase):
 
         vobj.addDisplayMode(self.node_wld, "World")
         vobj.addDisplayMode(self.node_scr, "Screen")
+        self._attach_precision_offset(vobj)
         self.updateData(vobj.Object, "Start")
         self.onChanged(vobj, "FontSize")
         self.onChanged(vobj, "FontName")
@@ -417,8 +472,9 @@ class ViewProviderLinearDimension(ViewProviderDimensionBase):
             proj = (self.p3 - self.p2).cross(App.Vector(0, 0, 1))
 
         # Calculate the arrow positions
-        p2 = (self.p2.x, self.p2.y, self.p2.z)
-        p3 = (self.p3.x, self.p3.y, self.p3.z)
+        self._set_precision_anchor(self.p2)
+        p2 = self._local_tuple(self.p2)
+        p3 = self._local_tuple(self.p3)
 
         self.trans1.translation.setValue(p2)
         self.coord1.point.setValue(p2)
@@ -519,7 +575,7 @@ class ViewProviderLinearDimension(ViewProviderDimensionBase):
             center = self.p2 + (self.p3 - self.p2).multiply(0.5)
             self.tbase = center + offset
 
-        self.textpos.translation.setValue([self.tbase.x, self.tbase.y, self.tbase.z])
+        self.textpos.translation.setValue(self._local_tuple(self.tbase))
         self.textpos.rotation = coin.SbRotation(
             self.trot[0], self.trot[1], self.trot[2], self.trot[3]
         )
@@ -570,21 +626,21 @@ class ViewProviderLinearDimension(ViewProviderDimensionBase):
             self.p2a = self.p2 + DraftVecUtils.scaleTo(self.p3 - self.p2, spacing)
             self.p2b = self.p3 + DraftVecUtils.scaleTo(self.p2 - self.p3, spacing)
             # fmt: off
-            self.coords.point.setValues([[self.p1.x, self.p1.y, self.p1.z],
-                                         [self.p2.x, self.p2.y, self.p2.z],
-                                         [self.p2a.x, self.p2a.y, self.p2a.z],
-                                         [self.p2b.x, self.p2b.y, self.p2b.z],
-                                         [self.p3.x, self.p3.y, self.p3.z],
-                                         [self.p4.x, self.p4.y, self.p4.z]])
+            self.coords.point.setValues([self._local_tuple(self.p1),
+                                         self._local_tuple(self.p2),
+                                         self._local_tuple(self.p2a),
+                                         self._local_tuple(self.p2b),
+                                         self._local_tuple(self.p3),
+                                         self._local_tuple(self.p4)])
             # fmt: on
             # self.line.numVertices.setValues([3, 3])
             self.line.coordIndex.setValues(0, 7, (0, 1, 2, -1, 3, 4, 5))
         else:
             # fmt: off
-            self.coords.point.setValues([[self.p1.x, self.p1.y, self.p1.z],
-                                         [self.p2.x, self.p2.y, self.p2.z],
-                                         [self.p3.x, self.p3.y, self.p3.z],
-                                         [self.p4.x, self.p4.y, self.p4.z]])
+            self.coords.point.setValues([self._local_tuple(self.p1),
+                                         self._local_tuple(self.p2),
+                                         self._local_tuple(self.p3),
+                                         self._local_tuple(self.p4)])
             # fmt: on
             # self.line.numVertices.setValue(4)
             self.line.coordIndex.setValues(0, 4, (0, 1, 2, 3))
@@ -887,6 +943,7 @@ class ViewProviderAngularDimension(ViewProviderDimensionBase):
 
         vobj.addDisplayMode(self.node_wld, "World")
         vobj.addDisplayMode(self.node_scr, "Screen")
+        self._attach_precision_offset(vobj)
         self.updateData(vobj.Object, None)
         self.onChanged(vobj, "FontSize")
         self.onChanged(vobj, "FontName")
@@ -924,6 +981,7 @@ class ViewProviderAngularDimension(ViewProviderDimensionBase):
         )
         self.p2 = self.circle.Vertexes[0].Point
         self.p3 = self.circle.Vertexes[-1].Point
+        self._set_precision_anchor(self.p2)
         midp = geo_edges.findMidpoint(self.circle)
         ray = midp - obj.Center
 
@@ -1002,7 +1060,9 @@ class ViewProviderAngularDimension(ViewProviderDimensionBase):
                        [self.p4.x, self.p4.y, self.p4.z]]
             # fmt: on
 
-            self.coords.point.setValues(pts1 + pts2 + ext_pts)
+            self.coords.point.setValues(
+                [self._local_seq(pt) for pt in pts1 + pts2 + ext_pts]
+            )
 
             p1_idx = pts1_num + pts2_num
             p4_idx = p1_idx + 1
@@ -1037,15 +1097,15 @@ class ViewProviderAngularDimension(ViewProviderDimensionBase):
                        [self.p4.x, self.p4.y, self.p4.z]]
             # fmt: on
 
-            self.coords.point.setValues(pts + ext_pts)
+            self.coords.point.setValues([self._local_seq(pt) for pt in pts + ext_pts])
             p1_idx = len(pts)
             p4_idx = p1_idx + 1
             all_indices = [p1_idx] + list(range(arcsegs + 1)) + [p4_idx]
             self.arc.coordIndex.setValues(0, len(all_indices), all_indices)
 
         # Set the arrow coords and rotation
-        p2 = (self.p2.x, self.p2.y, self.p2.z)
-        p3 = (self.p3.x, self.p3.y, self.p3.z)
+        p2 = self._local_tuple(self.p2)
+        p3 = self._local_tuple(self.p3)
 
         self.trans1.translation.setValue(p2)
         self.coord1.point.setValue(p2)
@@ -1152,7 +1212,7 @@ class ViewProviderAngularDimension(ViewProviderDimensionBase):
 
         self.tbase = self.tbase.add(offset)
         q = r.Q
-        self.textpos.translation.setValue([self.tbase.x, self.tbase.y, self.tbase.z])
+        self.textpos.translation.setValue(self._local_tuple(self.tbase))
         self.textpos.rotation = coin.SbRotation(q[0], q[1], q[2], q[3])
 
         # Set the angle property

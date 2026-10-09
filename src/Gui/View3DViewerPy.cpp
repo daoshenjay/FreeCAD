@@ -497,8 +497,8 @@ Py::Object View3DInventorViewerPy::getPointOnFocalPlane(const Py::Tuple& args)
         y = (int)Py::Long(t[1]);
     }
     try {
-        SbVec3f pt = _viewer->getPointOnFocalPlane(SbVec2s(x, y));
-        return Py::Vector(Base::Vector3f(pt[0], pt[1], pt[2]));
+        SbVec3d pt = _viewer->getPointOnFocalPlane(SbVec2s(x, y));
+        return Py::Vector(Base::Vector3d(pt[0], pt[1], pt[2]));
     }
     catch (const Base::Exception& e) {
         throw Py::RuntimeError(e.what());

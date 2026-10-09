@@ -132,6 +132,7 @@ class Wire(DraftObject):
 
         import Part
 
+        self.anchor_far_points(obj)
         plm = obj.Placement
         if obj.Base and (not obj.Tool):
             if obj.Base.isDerivedFrom("Sketcher::SketchObject"):

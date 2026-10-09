@@ -43,6 +43,7 @@ import FreeCAD as App
 from draftutils import gui_utils
 from draftutils import params
 from draftutils import utils
+from draftviewproviders.view_base import _f32
 from draftviewproviders.view_draft_annotation import ViewProviderDraftAnnotation
 
 if App.GuiUp:
@@ -99,6 +100,52 @@ class ViewProviderLabel(ViewProviderDraftAnnotation):
     def getIcon(self):
         """Return the path to the icon used by the viewprovider."""
         return ":/icons/Draft_Label.svg"
+
+    def _attach_precision_offset(self, vobj):
+        """Insert the root anchor node that carries the sub-lattice offset.
+
+        Coin stores scene graph translations in single precision: at 1e9
+        the float32 lattice spacing is 64 units, so world coordinates
+        written directly into SoTransform/SoCoordinate3 fields snap onto
+        the same lattice the grid nodes sit on.  The label viewprovider
+        keeps a ``SoTranslation`` anchor in the root node (before the
+        display mode switch) that carries ``float32(Placement.Base)``;
+        every value written below it is stored as ``p - float32(Base)``.
+        The renderer composes the view and anchor matrices first (their
+        large translations cancel there), so the small remainders
+        multiply in afterwards and survive; the geometry then lands on
+        the exact double precision world position.
+        """
+        if not App.GuiUp:
+            return
+        root = vobj.RootNode
+        if root is None or not hasattr(root, "getNumChildren"):
+            return
+        node = gui_utils.find_coin_node_by_name(root, "PrecisionCoordOffset")
+        if node is None:
+            node = coin.SoTranslation()
+            node.setName("PrecisionCoordOffset")
+            # Insert directly after the placement transform so the anchor
+            # applies to both display modes and everything below them.
+            index = 1 if root.getNumChildren() > 1 else root.getNumChildren()
+            root.insertChild(node, index)
+        self._precision_offset = node
+        self._anchor = App.Vector(0, 0, 0)
+
+    def _set_precision_anchor(self, base):
+        """Refresh the root anchor from the double precision label base."""
+        anchor = App.Vector(_f32(base.x), _f32(base.y), _f32(base.z))
+        self._anchor = anchor
+        node = getattr(self, "_precision_offset", None)
+        if node is not None:
+            node.translation.setValue(anchor.x, anchor.y, anchor.z)
+
+    def _local_tuple(self, p):
+        """Return the float32-local coordinates of a world point."""
+        a = getattr(self, "_anchor", None)
+        if a is None:
+            return (p.x, p.y, p.z)
+        return (p.x - a.x, p.y - a.y, p.z - a.z)
 
     def attach(self, vobj):
         """Set up the scene sub-graph of the viewprovider."""
@@ -185,6 +232,8 @@ class ViewProviderLabel(ViewProviderDraftAnnotation):
 
         vobj.addDisplayMode(self.node_wld, "World")
         vobj.addDisplayMode(self.node_scr, "Screen")
+        self._attach_precision_offset(vobj)
+        self._set_precision_anchor(vobj.Object.Placement.Base)
         self.onChanged(vobj, "LineColor")
         self.onChanged(vobj, "TextColor")
         self.onChanged(vobj, "LineWidth")
@@ -210,10 +259,13 @@ class ViewProviderLabel(ViewProviderDraftAnnotation):
         """Execute when a property from the Proxy class is changed."""
         vobj = obj.ViewObject
         if prop == "Points":
+            self._set_precision_anchor(obj.Placement.Base)
             n_points = len(obj.Points)
             if n_points >= 2:
                 self.line.coordIndex.deleteValues(0)
-                self.lcoords.point.setValues(obj.Points)
+                self.lcoords.point.setValues(
+                    [self._local_tuple(p) for p in obj.Points]
+                )
                 self.line.coordIndex.setValues(0, n_points, range(n_points))
                 self.onChanged(obj.ViewObject, "ArrowTypeStart")
 
@@ -240,6 +292,11 @@ class ViewProviderLabel(ViewProviderDraftAnnotation):
                     vobj.Justification = "Left"
 
             self.onChanged(vobj, "DisplayMode")  # trigger update_label and update_frame.
+
+        elif prop == "Placement":
+            self._set_precision_anchor(obj.Placement.Base)
+            self.onChanged(vobj, "DisplayMode")
+            self.onChanged(vobj, "ArrowTypeStart")
 
         elif prop == "Text" and obj.Text:
             self.update_text(obj, vobj)
@@ -374,7 +431,7 @@ class ViewProviderLabel(ViewProviderDraftAnnotation):
                 obj.purgeTouched()
 
         if vobj.DisplayMode == "Screen":
-            self.textpos.translation.setValue(obj.Placement.Base)
+            self.textpos.translation.setValue(self._local_tuple(obj.Placement.Base))
             return
 
         line_height = size * line_spacing
@@ -409,7 +466,7 @@ class ViewProviderLabel(ViewProviderDraftAnnotation):
 
         v = obj.Placement.Rotation.multVec(v)
         pos = v + obj.Placement.Base
-        self.textpos.translation.setValue(pos)
+        self.textpos.translation.setValue(self._local_tuple(pos))
         self.textpos.rotation.setValue(obj.Placement.Rotation.Q)
 
     def update_arrow(self, obj, vobj):
@@ -439,7 +496,7 @@ class ViewProviderLabel(ViewProviderDraftAnnotation):
         rot = App.Rotation(axis, angle)
 
         self.arrowpos.rotation.setValue((obj.Placement.Rotation * rot).Q)
-        self.arrowpos.translation.setValue(obj.Points[-1])
+        self.arrowpos.translation.setValue(self._local_tuple(obj.Points[-1]))
 
     def update_frame(self, obj, vobj):
         """Update the frame around the text."""

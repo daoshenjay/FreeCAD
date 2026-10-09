@@ -101,6 +101,22 @@ class Circle(DraftObject):
         obj.Placement = plm
         obj.positionBySupport()
         self.props_changed_clear()
+        if App.GuiUp:
+            from draftutils.messages import _log
+
+            b = obj.Placement.Base
+            _log(
+                "Draft circle execute: {0} Placement.Base=({1:.6f}, {2:.6f}, {3:.6f}) "
+                "input_plm=({4:.6f}, {5:.6f}, {6:.6f})".format(
+                    obj.Name,
+                    b.x,
+                    b.y,
+                    b.z,
+                    plm.Base.x,
+                    plm.Base.y,
+                    plm.Base.z,
+                )
+            )
 
     def onChanged(self, obj, prop):
         self.props_changed_store(prop)

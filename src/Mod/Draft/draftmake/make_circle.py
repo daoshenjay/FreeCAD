@@ -38,6 +38,7 @@ import DraftVecUtils
 from draftgeoutils import general as geo_general
 from draftobjects.circle import Circle
 from draftutils import utils
+from draftutils.messages import _log
 from draftutils import gui_utils
 
 if App.GuiUp:
@@ -153,6 +154,19 @@ def make_circle(radius, placement=None, face=None, startangle=None, endangle=Non
         ViewProviderDraft(obj.ViewObject)
         gui_utils.format_object(obj)
         gui_utils.select(obj)
+
+    b = obj.Placement.Base
+    _log(
+        "Draft make_circle: name={0} Placement.Base=({1:.6f}, {2:.6f}, {3:.6f}) "
+        "requested={4} MapMode={5}".format(
+            obj.Name,
+            b.x,
+            b.y,
+            b.z,
+            placement.Base if placement else None,
+            getattr(obj, "MapMode", "?"),
+        )
+    )
 
     return obj
 

@@ -48,7 +48,7 @@ from draftutils import gui_utils
 from draftutils import params
 from draftutils import todo
 from draftutils import utils
-from draftutils.messages import _log, _toolmsg
+from draftutils.messages import _log, _msg, _toolmsg
 
 
 class DraftTool:
@@ -131,6 +131,11 @@ class DraftTool:
         self.planetrack = None
         if params.get_param("showPlaneTracker"):
             self.planetrack = trackers.PlaneTracker()
+        self._origin_sensor = None
+        origin = self._tracker_origin()
+        if origin is not None:
+            trackers.set_origin(origin)
+        self._attach_origin_sensor()
         if hasattr(Gui, "Snapper"):
             Gui.Snapper.setTrackers()
 
@@ -139,6 +144,104 @@ class DraftTool:
 
         # update hints after the tool is fully initialized
         QtCore.QTimer.singleShot(0, self.update_hints)
+
+    def _tracker_origin(self):
+        """Point at the viewport centre on the focal plane (world double).
+
+        This point is the float32 anchor shared by all Draft trackers and
+        previews.  It only has to sit next to the camera *and* the visible
+        scene, on the view ray, so that float32 subtraction stays exact.
+        It must not be projected onto the working plane: that would pin the
+        normal component to the plane while the scene sits at a different
+        height, leaving float32(world - origin) huge and the preview
+        quantised out of the viewport.
+
+        Returns None only when no anchor at all can be determined, so the
+        previous origin is kept instead of falling back to an empty
+        (0, 0, 0) anchor.
+        """
+        view = self.view
+        if view is None:
+            return None
+        pt = None
+        try:
+            size = view.getSize()
+            focal = view.getPointOnFocalPlane(int(size[0] / 2), int(size[1] / 2))
+            cand = App.Vector(focal.x, focal.y, focal.z)
+            # Coin returns an all-zero vector when the camera lookup fails.
+            if cand.Length != 0:
+                pt = cand
+        except Exception as exc:
+            _log("Draft _tracker_origin focal plane failed: {0}".format(exc))
+        if pt is None:
+            # Fall back to the camera position: an anchor at (0, 0, 0) is
+            # useless when the scene sits far from the world origin, so a
+            # stale or empty anchor must never be returned.
+            try:
+                cam = view.getCameraNode()
+                pos = cam.position.getValue()
+                pt = App.Vector(pos[0], pos[1], pos[2])
+            except Exception as exc:
+                _log("Draft _tracker_origin camera fallback failed: {0}".format(exc))
+                return None
+        return pt
+
+    def _origin_threshold(self):
+        """How far the viewport center must move before refreshing O (Sketcher-like)."""
+        size = 0.0
+        view = self.view
+        if view is not None:
+            try:
+                sz = view.getSize()
+                p0 = view.getPointOnFocalPlane(0, 0)
+                p1 = view.getPointOnFocalPlane(int(sz[0]), int(sz[1]))
+                a = App.Vector(p0.x, p0.y, p0.z)
+                b = App.Vector(p1.x, p1.y, p1.z)
+                # The focal-plane corner distance already is the physical
+                # viewport size, so no working-plane projection is needed.
+                size = (b - a).Length
+            except Exception:
+                size = 0.0
+        if size > 0:
+            return max(1.0, 0.01 * size)
+        cur = trackers.get_origin()
+        mag = max(abs(cur.x), abs(cur.y), abs(cur.z), 1.0)
+        return max(1.0, mag * 1e-6)
+
+    def _attach_origin_sensor(self):
+        """Follow camera motion so O tracks the viewport while the command runs."""
+        self._detach_origin_sensor()
+        view = self.view
+        if view is None:
+            return
+        try:
+            cam = view.getCameraNode()
+        except Exception as exc:
+            _log("Draft origin camera sensor unavailable: {0}".format(exc))
+            return
+        if cam is None:
+            return
+        from pivy import coin
+
+        self._origin_sensor = coin.SoNodeSensor(self._origin_sensor_cb, None)
+        self._origin_sensor.attach(cam)
+
+    def _detach_origin_sensor(self):
+        sensor = getattr(self, "_origin_sensor", None)
+        if sensor is None:
+            return
+        try:
+            sensor.detach()
+        except Exception:
+            pass
+        self._origin_sensor = None
+
+    def _origin_sensor_cb(self, data, sensor):
+        origin = self._tracker_origin()
+        if origin is None:
+            return
+        if (origin - trackers.get_origin()).Length > self._origin_threshold():
+            trackers.set_origin(origin)
 
     def update_hints(self):
         Gui.HintManager.show(*self.get_hints())
@@ -183,6 +286,8 @@ class DraftTool:
             Gui.Snapper.off()
         if self.planetrack:
             self.planetrack.finalize()
+        self._detach_origin_sensor()
+        trackers.set_origin(App.Vector(0, 0, 0))
         self.wp._restore()
         if self.commitList:
             last_cmd = self.commitList[-1][1][-1]

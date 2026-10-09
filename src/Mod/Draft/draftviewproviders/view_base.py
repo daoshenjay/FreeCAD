@@ -33,6 +33,8 @@ the same basic behavior."""
 
 ## \addtogroup draftviewproviders
 # @{
+import struct
+
 import PySide.QtCore as QtCore
 import PySide.QtGui as QtGui
 from PySide.QtCore import QT_TRANSLATE_NOOP
@@ -50,6 +52,11 @@ if App.GuiUp:
 
     # The module is used to prevent complaints from code checkers (flake8)
     bool(Draft_rc.__name__)
+
+
+def _f32(value):
+    """Round-trip through float32, matching Coin SoSFVec3f field storage."""
+    return struct.unpack("f", struct.pack("f", float(value)))[0]
 
 
 class ViewProviderDraft(object):
@@ -186,6 +193,7 @@ class ViewProviderDraft(object):
         self.texcoords = None
         self.Object = vobj.Object
         self.onChanged(vobj, "Pattern")
+        self._attach_vertex_offset(vobj)
         return
 
     def updateData(self, obj, prop):
@@ -194,7 +202,8 @@ class ViewProviderDraft(object):
         Override this method to handle the behavior of the view provider
         depending on changes that occur to the real object's properties.
 
-        By default, no property is tested, and it does nothing.
+        The `Placement` property is tracked so the vertex-space precision
+        correction stays in sync; no other property is tested by default.
 
         Parameters
         ----------
@@ -207,6 +216,185 @@ class ViewProviderDraft(object):
         prop : str
             Name of the property that was modified.
         """
+        if App.GuiUp and getattr(self, "_coord_source", None) is None:
+            # The shape coordinates only become reachable once the C++
+            # attach has run; bind on the first property update after
+            # attach instead of waiting for a timer tick.
+            try:
+                self._bind_vertex_coords(obj.ViewObject)
+            except Exception:
+                pass
+        if prop == "Placement":
+            self._update_vertex_offset(obj)
+        return
+
+    def _attach_vertex_offset(self, vobj):
+        """Set up the vertex-space float32 precision correction.
+
+        Coin composes the model matrix chain in single precision: the
+        Placement transform can only store ``float32(Base)``, and at 1e9
+        the float32 lattice spacing is 64 units, so *no* translation node
+        can carry the sub-lattice remainder (every float translation lands
+        on the lattice while the double Placement does not).  The
+        correction therefore lives in vertex space: a private
+        ``SoCoordinate3`` node inserted right after the C++ shape
+        coordinates mirrors their points shifted by
+        ``R^-1 * (Base - float32(Base))``.  The renderer then composes
+        ``float32(Base) + R * (v + correction)`` and lands on the exact
+        double Placement while every addend stays viewport-sized and
+        float32-exact.
+
+        The C++ coordinates node is created by the C++ attach that runs
+        right after this Python attach, so binding is retried on the next
+        event loop turns and from ``updateData``.  A field sensor
+        re-mirrors the points whenever C++ rewrites them (shape rebuild,
+        display mode, document restore).
+
+        Near the origin the remainder is sub-ULP and the mirror only
+        copies the points unchanged.
+        """
+        if not App.GuiUp:
+            return
+        self._unbind_vertex_offset()
+        root = vobj.RootNode
+        if root is None:
+            return
+        # Drop nodes left behind by the earlier anchor-based revision.
+        i = 0
+        while i < root.getNumChildren():
+            child = root.getChild(i)
+            if child.getName() in ("PrecisionAnchor", "PrecisionCoordOffset"):
+                root.removeChild(child)
+            else:
+                i += 1
+        if hasattr(self, "_precision_anchor"):
+            del self._precision_anchor
+        bound = False
+        try:
+            # Never let a bind failure abort the Python attach: that would
+            # also skip the C++ attach chained after it.
+            bound = self._bind_vertex_coords(vobj)
+        except Exception:
+            bound = False
+        if not bound:
+            # The C++ attach inserts the shape coordinates right after
+            # this Python attach; retry once the event loop turns.
+            QtCore.QTimer.singleShot(0, lambda: self._retry_vertex_coords(vobj, 0))
+        return
+
+    def _retry_vertex_coords(self, vobj, attempt):
+        """Retry binding until the C++ shape coordinates appear."""
+        try:
+            if self._bind_vertex_coords(vobj):
+                return
+        except Exception:
+            return
+        if attempt < 4:
+            QtCore.QTimer.singleShot(0, lambda: self._retry_vertex_coords(vobj, attempt + 1))
+
+    def _bind_vertex_coords(self, vobj):
+        """Mirror the C++ shape coordinates through a private node.
+
+        Returns True once the mirror and its field sensor are in place.
+        """
+        if getattr(self, "_coord_source", None) is not None:
+            return True
+        if not App.GuiUp:
+            return False
+        root = vobj.RootNode
+        source = None
+        source_index = -1
+        for i in range(root.getNumChildren()):
+            child = root.getChild(i)
+            if isinstance(child, coin.SoCoordinate3) and child.getName() != "PrecisionCoordOffset":
+                source = child
+                source_index = i
+                break
+        if source is None:
+            return False
+        node = coin.SoCoordinate3()
+        node.setName("PrecisionCoordOffset")
+        # pivy signature: insertChild(child, index)
+        root.insertChild(node, source_index + 1)
+        sensor = coin.SoFieldSensor(self._vertex_sensor_cb, None)
+        sensor.attach(source.point)
+        self._coord_source = source
+        self._coord_node = node
+        self._coord_root = root
+        self._coord_sensor = sensor
+        self._coord_offset = App.Vector(0, 0, 0)
+        self._update_vertex_offset(vobj.Object)
+        return True
+
+    def _unbind_vertex_offset(self):
+        """Detach the sensor and remove a previously inserted mirror."""
+        sensor = getattr(self, "_coord_sensor", None)
+        if sensor is not None:
+            try:
+                sensor.detach()
+            except Exception:
+                pass
+        node = getattr(self, "_coord_node", None)
+        root = getattr(self, "_coord_root", None)
+        if node is not None and root is not None:
+            try:
+                root.removeChild(node)
+            except Exception:
+                pass
+        self._coord_sensor = None
+        self._coord_node = None
+        self._coord_root = None
+        self._coord_source = None
+        self._coord_offset = App.Vector(0, 0, 0)
+        return
+
+    def _vertex_sensor_cb(self, data, sensor):
+        """Re-mirror the points after C++ rewrites the shape coordinates."""
+        try:
+            self._mirror_vertex_coords()
+        except Exception:
+            pass
+
+    def _update_vertex_offset(self, obj):
+        """Recompute the local correction and refresh the mirror."""
+        if getattr(self, "_coord_source", None) is None:
+            return
+        if obj is None or not hasattr(obj, "Placement"):
+            return
+        self._coord_offset = self._vertex_local_offset(obj)
+        self._mirror_vertex_coords()
+        return
+
+    def _vertex_local_offset(self, obj):
+        """Return ``R^-1 * (Base - float32(Base))`` in the local frame."""
+        base = obj.Placement.Base
+        dx = base.x - _f32(base.x)
+        dy = base.y - _f32(base.y)
+        dz = base.z - _f32(base.z)
+        if dx == 0.0 and dy == 0.0 and dz == 0.0:
+            return App.Vector(0, 0, 0)
+        # Placement.inverse() returns a new Placement (Rotation.invert()
+        # would mutate the object's rotation in place).
+        return obj.Placement.inverse().Rotation.multVec(App.Vector(dx, dy, dz))
+
+    def _mirror_vertex_coords(self):
+        """Copy the C++ points plus the local correction into the mirror."""
+        source = getattr(self, "_coord_source", None)
+        node = getattr(self, "_coord_node", None)
+        if source is None or node is None:
+            return
+        n = source.point.getNum()
+        if n == 0:
+            if node.point.getNum() != 0:
+                node.point.setNum(0)
+            return
+        off = getattr(self, "_coord_offset", None) or App.Vector(0, 0, 0)
+        points = list(source.point.getValues())
+        if off.x or off.y or off.z:
+            points = [(p[0] + off.x, p[1] + off.y, p[2] + off.z) for p in points]
+        # setNum first so a shrinking rebuild cannot leave stale points.
+        node.point.setNum(n)
+        node.point.setValues(0, n, points)
         return
 
     def getDisplayModes(self, vobj):
@@ -590,6 +778,7 @@ class ViewProviderDraftAlt(ViewProviderDraft):
         return []
 
     def updateData(self, obj, prop):
+        super().updateData(obj, prop)
         if prop == "AutoUpdate":
             obj.ViewObject.signalChangeIcon()
 

@@ -1663,8 +1663,8 @@ Py::Object View3DInventorPy::getPointOnFocalPlane(const Py::Tuple& args)
         y = (int)Py::Long(t[1]);
     }
     try {
-        SbVec3f pt = getView3DInventorPtr()->getViewer()->getPointOnFocalPlane(SbVec2s(x, y));
-        return Py::Vector(Base::Vector3f(pt[0], pt[1], pt[2]));
+        SbVec3d pt = getView3DInventorPtr()->getViewer()->getPointOnFocalPlane(SbVec2s(x, y));
+        return Py::Vector(Base::Vector3d(pt[0], pt[1], pt[2]));
     }
     catch (const Base::Exception& e) {
         throw Py::RuntimeError(e.what());
@@ -1717,11 +1717,11 @@ Py::Object View3DInventorPy::projectPointToLine(const Py::Tuple& args)
         y = (int)Py::Long(t[1]);
     }
     try {
-        SbVec3f pt1, pt2;
+        SbVec3d pt1, pt2;
         getView3DInventorPtr()->getViewer()->projectPointToLine(SbVec2s(x, y), pt1, pt2);
         Py::Tuple tuple(2);
-        tuple.setItem(0, Py::Vector(Base::Vector3f(pt1[0], pt1[1], pt1[2])));
-        tuple.setItem(1, Py::Vector(Base::Vector3f(pt2[0], pt2[1], pt2[2])));
+        tuple.setItem(0, Py::Vector(Base::Vector3d(pt1[0], pt1[1], pt1[2])));
+        tuple.setItem(1, Py::Vector(Base::Vector3d(pt2[0], pt2[1], pt2[2])));
         return tuple;
     }
     catch (const Base::Exception& e) {

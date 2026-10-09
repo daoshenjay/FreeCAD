@@ -49,7 +49,7 @@ from draftguitools import gui_trackers as trackers
 from draftutils import gui_utils
 from draftutils import params
 from draftutils import utils
-from draftutils.messages import _err, _toolmsg
+from draftutils.messages import _err, _log, _toolmsg
 from draftutils.translate import translate
 
 
@@ -80,6 +80,7 @@ class Arc(gui_base_original.Creator):
             self.center = None
             self.rad = None
             self.angle = 0  # angle inscribed by arc
+            self.firstangle = 0
             self.tangents = []
             self.tanpoints = []
             if self.featureName == "Arc":
@@ -91,7 +92,41 @@ class Arc(gui_base_original.Creator):
             self.linetrack = trackers.lineTracker(dotted=True)
             self.arctrack = trackers.arcTracker()
             self.call = self.view.addEventCallback("SoEvent", self.action)
+            self._log_snap_grid_state()
             _toolmsg(translate("draft", "Pick center point"))
+
+    def _log_snap_grid_state(self):
+        """PrintLog: snap/grid prefs that can move points onto the grid."""
+        try:
+            always = params.get_param("alwaysSnap")
+        except Exception:
+            always = "?"
+        try:
+            spacing = params.get_grid_param("gridSpacing")
+        except Exception:
+            spacing = "?"
+        grid_on = False
+        snap_r = None
+        if hasattr(Gui, "Snapper"):
+            try:
+                grid_on = Gui.Snapper.isEnabled("Grid")
+            except Exception:
+                grid_on = False
+            try:
+                pos = (0, 0)
+                snap_r = Gui.Snapper.getScreenDist(params.get_param("snapRange"), pos)
+            except Exception:
+                snap_r = None
+        _log(
+            "Draft snap state: alwaysSnap={0} GridEnabled={1} gridSpacing={2} "
+            "snapRangePx={3} snapRadiusWorld@0={4}".format(
+                always,
+                grid_on,
+                spacing,
+                params.get_param("snapRange") if hasattr(params, "get_param") else "?",
+                snap_r,
+            )
+        )
 
     def finish(self, cont=False):
         """Terminate the operation.
@@ -246,11 +281,13 @@ class Arc(gui_base_original.Creator):
 
         elif arg["Type"] == "SoMouseButtonEvent":  # mouse click
             if arg["State"] == "DOWN" and arg["Button"] == "BUTTON1":
+                # Always sample this click; the last mousemove may be stale
+                # (and is skipped entirely when support was preselected).
+                if self.step == 0 and not self.support:
+                    gui_tool_utils.getSupport(arg)
+                self.point, ctrlPoint, info = gui_tool_utils.getPoint(self, arg)
                 if self.point:
                     if self.step == 0:  # choose center
-                        if not self.support:
-                            gui_tool_utils.getSupport(arg)
-                            self.point, ctrlPoint, info = gui_tool_utils.getPoint(self, arg)
                         if gui_tool_utils.hasMod(arg, gui_tool_utils.get_mod_alt_key()):
                             snapped = self.view.getObjectInfo(
                                 (arg["Position"][0], arg["Position"][1])
@@ -275,9 +312,8 @@ class Arc(gui_base_original.Creator):
                                 self.node = [self.point]
                                 self.arctrack.setCenter(self.center)
                                 self.linetrack.p1(self.center)
-                                self.linetrack.p2(
-                                    self.view.getPoint(arg["Position"][0], arg["Position"][1])
-                                )
+                                self.linetrack.p2(self.point)
+                                self._log_center_f32(arg)
                             self.arctrack.on()
                             self.ui.radiusUi()
                             self.step = 1
@@ -287,6 +323,19 @@ class Arc(gui_base_original.Creator):
                             if self.planetrack:
                                 self.planetrack.set(self.point)
                     elif self.step == 1:  # choose radius
+                        if self.center and DraftVecUtils.dist(self.point, self.center) > 0:
+                            viewdelta = DraftVecUtils.project(
+                                self.point.sub(self.center), self.wp.axis
+                            )
+                            if not DraftVecUtils.isNull(viewdelta):
+                                self.point = self.point.add(viewdelta.negative())
+                        if not self.tangents:
+                            self.rad = DraftVecUtils.dist(self.point, self.center)
+                            self.ui.setRadiusValue(self.rad, "Length")
+                            self.arctrack.setRadius(self.rad)
+                            self.linetrack.p1(self.center)
+                            self.linetrack.p2(self.point)
+                            self.linetrack.on()
                         if self.closedCircle:
                             self.drawArc()
                         else:
@@ -298,6 +347,7 @@ class Arc(gui_base_original.Creator):
                             self.step = 2
                             _toolmsg(translate("draft", "Pick start angle"))
                     elif self.step == 2:  # choose first angle
+                        self._update_first_angle_from_point()
                         self.ui.labelRadius.setText(translate("draft", "Aperture angle"))
                         self.ui.radiusValue.setToolTip(translate("draft", "Aperture angle"))
                         ang_offset = DraftVecUtils.angle(
@@ -307,13 +357,135 @@ class Arc(gui_base_original.Creator):
                         self.step = 3
                         _toolmsg(translate("draft", "Pick aperture"))
                     else:  # choose second angle
+                        self._update_aperture_from_point()
                         self.step = 4
                         self.drawArc()
                     self.update_hints()
 
+    def _log_center_f32(self, arg):
+        """Log double center vs Coin float32 transform (PrintLog only)."""
+        center = App.Vector(self.center)
+        origin = trackers.get_origin()
+        f32 = self.arctrack.centerF32()
+        delta = (center - f32).Length
+        local = trackers.to_local(center)
+        f32ox = trackers._f32(origin.x)
+        f32oy = trackers._f32(origin.y)
+        f32oz = trackers._f32(origin.z)
+        local_f32 = App.Vector(
+            trackers._f32(center.x - f32ox),
+            trackers._f32(center.y - f32oy),
+            trackers._f32(center.z - f32oz),
+        )
+        # float32 ULP at |local| is approximately |local| * 2**-23
+        mag = max(abs(local.x), abs(local.y), abs(local.z), 1.0)
+        ulp = mag * (2.0**-23)
+        snap_info = getattr(Gui.Snapper, "snapInfo", None) if hasattr(Gui, "Snapper") else None
+        raw = None
+        c_raw = float("nan")
+        try:
+            raw = App.Vector(self.view.getPoint(arg["Position"]))
+            c_raw = (center - raw).Length
+        except Exception:
+            raw = None
+            c_raw = float("nan")
+        always = params.get_param("alwaysSnap")
+        grid_on = False
+        snap_r = None
+        if hasattr(Gui, "Snapper"):
+            try:
+                grid_on = Gui.Snapper.isEnabled("Grid")
+                snap_r = Gui.Snapper.getScreenDist(
+                    params.get_param("snapRange"), tuple(arg["Position"])
+                )
+            except Exception:
+                pass
+        try:
+            spacing = params.get_grid_param("gridSpacing")
+        except Exception:
+            spacing = "?"
+        _log(
+            "Draft center click: pos={0} O=({1:.6f}, {2:.6f}, {3:.6f}) "
+            "C=({4:.6f}, {5:.6f}, {6:.6f}) rendered=({7:.6f}, {8:.6f}, {9:.6f}) "
+            "|C-rendered|={10:.6g} local=({11:.6f}, {12:.6f}, {13:.6f}) "
+            "local_f32_err={14:.6g} ulp/2~={15:.6g} snap={16} support={17} "
+            "raw={18} |C-raw|={19:.6g} alwaysSnap={20} Grid={21} "
+            "gridSpacing={22} snapRadius={23}".format(
+                arg.get("Position"),
+                origin.x,
+                origin.y,
+                origin.z,
+                center.x,
+                center.y,
+                center.z,
+                f32.x,
+                f32.y,
+                f32.z,
+                delta,
+                local.x,
+                local.y,
+                local.z,
+                (local - local_f32).Length,
+                0.5 * ulp,
+                bool(snap_info),
+                bool(self.support),
+                raw,
+                c_raw,
+                always,
+                grid_on,
+                spacing,
+                snap_r,
+            )
+        )
+
+    def _update_first_angle_from_point(self):
+        """Refresh first angle from the current click sample."""
+        if not self.center:
+            return
+        currentrad = DraftVecUtils.dist(self.point, self.center)
+        if currentrad != 0:
+            angle = DraftVecUtils.angle(self.wp.u, self.point.sub(self.center), self.wp.axis)
+        else:
+            angle = 0
+        self.linetrack.p2(
+            DraftVecUtils.scaleTo(self.point.sub(self.center), self.rad).add(self.center)
+        )
+        self.ui.setRadiusValue(math.degrees(angle), unit="Angle")
+        self.firstangle = angle
+
+    def _update_aperture_from_point(self):
+        """Refresh aperture angle from the current click sample."""
+        if not self.center:
+            return
+        currentrad = DraftVecUtils.dist(self.point, self.center)
+        if currentrad != 0:
+            angle = DraftVecUtils.angle(self.wp.u, self.point.sub(self.center), self.wp.axis)
+        else:
+            angle = 0
+        self.linetrack.p2(
+            DraftVecUtils.scaleTo(self.point.sub(self.center), self.rad).add(self.center)
+        )
+        self.updateAngle(angle)
+        self.ui.setRadiusValue(math.degrees(self.angle), unit="Angle")
+        self.arctrack.setApertureAngle(self.angle)
+
     def drawArc(self):
         """Actually draw the arc object."""
         rot, sup, pts, fil = self.getStrings()
+        c = self.center
+        _log(
+            "Draft drawArc: closed={0} center=({1:.6f}, {2:.6f}, {3:.6f}) "
+            "rad={4} support={5} first={6:.6f} aperture={7:.6f}".format(
+                self.closedCircle,
+                c.x if c else float("nan"),
+                c.y if c else float("nan"),
+                c.z if c else float("nan"),
+                self.rad,
+                sup,
+                math.degrees(self.firstangle),
+                math.degrees(self.angle),
+            )
+        )
         if self.closedCircle:
             try:
                 # The command to run is built as a series of text strings
@@ -365,6 +537,7 @@ class Arc(gui_base_original.Creator):
                 sta, end = end, sta
             sta %= 360
             end %= 360
+            _log("Draft arc angles: sta={0:.6f} end={1:.6f} equal={2}".format(sta, end, sta == end))
 
             try:
                 Gui.addModule("Draft")

@@ -110,6 +110,10 @@ class ViewProviderWire(ViewProviderDraft):
         self.onChanged(vobj, "ArrowSizeStart")
 
     def updateData(self, obj, prop):
+        # Forward first: ViewProviderDraft tracks Placement for the
+        # float32 precision correction, and the Shape branch below may
+        # return early (null shape) before reaching the end.
+        super().updateData(obj, prop)
         if (
             prop == "Shape"
             and hasattr(obj, "Closed")
@@ -134,13 +138,13 @@ class ViewProviderWire(ViewProviderDraft):
             else:
                 v1 = obj.Points[1].sub(obj.Points[0])
                 v2 = obj.Points[end_idx - 1].sub(obj.Points[end_idx])
-            self.coords1.translation.setValue(*obj.Points[0])
+            self.coords1.translation.setValue(*obj.Placement.multVec(obj.Points[0]))
             if not DraftVecUtils.isNull(v1):
                 v1.normalize()
                 rot1 = coin.SbRotation()
                 rot1.setValue(coin.SbVec3f(1, 0, 0), coin.SbVec3f(*v1))
                 self.coords1.rotation.setValue(rot1)
-            self.coords2.translation.setValue(*obj.Points[end_idx])
+            self.coords2.translation.setValue(*obj.Placement.multVec(obj.Points[end_idx]))
             if not DraftVecUtils.isNull(v2):
                 v2.normalize()
                 rot2 = coin.SbRotation()

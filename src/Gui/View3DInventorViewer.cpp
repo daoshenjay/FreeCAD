@@ -43,8 +43,14 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 
 #include <Inventor/SbBox.h>
+#include <Inventor/SbDPLine.h>
+#include <Inventor/SbDPViewVolume.h>
+#include <Inventor/SbVec2d.h>
+#include <Inventor/SbVec3d.h>
+#include <Inventor/SbViewVolume.h>
 #include <Inventor/sensors/SoTimerSensor.h>
 #include <Inventor/SoEventManager.h>
 #include <Inventor/SoPickedPoint.h>
@@ -166,6 +172,38 @@
 
 
 FC_LOG_LEVEL_INIT("3DViewer", true, true)
+
+namespace
+{
+// Double-precision ray/plane intersection used by the screen->world helpers.
+// Coin's SbPlane/SbLine path is float32 and quantizes points far from the origin.
+bool intersectRayPlaneDP(
+    const SbDPLine& ray,
+    const SbVec3d& planePoint,
+    const SbVec3d& planeNormal,
+    SbVec3d& out
+)
+{
+    const double denom = planeNormal.dot(ray.getDirection());
+    if (!std::isfinite(denom) || std::fabs(denom) < std::numeric_limits<double>::epsilon()) {
+        return false;
+    }
+    const double t = planeNormal.dot(planePoint - ray.getPosition()) / denom;
+    out = ray.getPosition() + ray.getDirection() * t;
+    return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
+}
+
+// Project normalized viewport coordinates through the double-precision view volume.
+bool projectNormalizedToRayDP(const SbViewVolume& vol, const SbVec2f& pnt2d, SbDPLine& ray)
+{
+    vol.getDPViewVolume().projectPointToLine(
+        SbVec2d(static_cast<double>(pnt2d[0]), static_cast<double>(pnt2d[1])),
+        ray
+    );
+    return std::isfinite(ray.getPosition()[0]) && std::isfinite(ray.getPosition()[1])
+        && std::isfinite(ray.getPosition()[2]);
+}
+}  // namespace
 
 // #define FC_LOGGING_CB
 
@@ -3728,11 +3766,6 @@ Base::BoundBox2d View3DInventorViewer::getViewportOnXYPlaneOfPlacement(Base::Pla
     Base::Vector3d zAxis(0, 0, 1);
     rot.multVec(zAxis, zAxis);
 
-    // Get the position and convert Base::Vector3d to SbVec3f
-    SbVec3f planeNormal(zAxis.x, zAxis.y, zAxis.z);
-    SbVec3f planePosition(pos.x, pos.y, pos.z);
-    SbPlane xyPlane(planeNormal, planePosition);
-
     const SbViewportRegion& vp = this->getSoRenderManager()->getViewportRegion();
     SbViewVolume vol = pCam->getViewVolume();
 
@@ -3749,12 +3782,16 @@ Base::BoundBox2d View3DInventorViewer::getViewportOnXYPlaneOfPlacement(Base::Pla
             y = (y - 0.5f * dY) / fRatio + 0.5f * dY;
         }
 
-        SbLine line;
-        vol.projectPointToLine(SbVec2f(x, y), line);
+        SbDPLine line;
+        if (!projectNormalizedToRayDP(vol, SbVec2f(x, y), line)) {
+            return;
+        }
 
-        SbVec3f pt;
-        // Intersection point on the XY plane.
-        if (!xyPlane.intersect(line, pt)) {
+        // Intersection point on the XY plane (double precision).
+        const SbVec3d planeNormal(zAxis.x, zAxis.y, zAxis.z);
+        const SbVec3d planePoint(pos.x, pos.y, pos.z);
+        SbVec3d pt;
+        if (!intersectRayPlaneDP(line, planePoint, planeNormal, pt)) {
             return;
         }
 
@@ -3777,7 +3814,7 @@ Base::BoundBox2d View3DInventorViewer::getViewportOnXYPlaneOfPlacement(Base::Pla
     return projBBox.ProjectBox(&proj);
 }
 
-SbVec3f View3DInventorViewer::getPointOnXYPlaneOfPlacement(
+SbVec3d View3DInventorViewer::getPointOnXYPlaneOfPlacement(
     const SbVec2s& pnt,
     const Base::Placement& plc
 ) const
@@ -3790,57 +3827,31 @@ SbVec3f View3DInventorViewer::getPointOnXYPlaneOfPlacement(
     }
 
     SbViewVolume vol = pCam->getViewVolume();
-    SbLine line;
-    vol.projectPointToLine(pnt2d, line);
+    SbDPLine line;
+    if (!projectNormalizedToRayDP(vol, pnt2d, line)) {
+        throw Base::RuntimeError("No intersection found");
+    }
 
     // Calculate the plane using plc
     Base::Rotation rot = plc.getRotation();
     Base::Vector3d normalVector = rot.multVec(Base::Vector3d(0, 0, 1));
-    SbVec3f planeNormal = Base::convertTo<SbVec3f>(normalVector);
-
-    // Get the position and convert Base::Vector3d to SbVec3f
     Base::Vector3d pos = plc.getPosition();
-    SbVec3f planePosition = Base::convertTo<SbVec3f>(pos);
-    SbPlane xyPlane(planeNormal, planePosition);
 
-    SbVec3f pt;
-    if (xyPlane.intersect(line, pt)) {
+    const SbVec3d planeNormal(normalVector.x, normalVector.y, normalVector.z);
+    const SbVec3d planePoint(pos.x, pos.y, pos.z);
+
+    SbVec3d pt;
+    if (intersectRayPlaneDP(line, planePoint, planeNormal, pt)) {
         return pt;  // Intersection point on the XY plane
     }
 
     throw Base::RuntimeError("No intersection found");
 }
 
-SbVec3f projectPointOntoPlane(const SbVec3f& point, const SbPlane& plane)
-{
-    SbVec3f planeNormal = plane.getNormal();
-    float d = plane.getDistanceFromOrigin();
-    float distance = planeNormal.dot(point) + d;
-    return point - planeNormal * distance;
-}
-
-// Project a line onto a plane
-SbLine projectLineOntoPlane(const SbVec3f& p1, const SbVec3f& p2, const SbPlane& plane)
-{
-    SbVec3f projectedPoint1 = projectPointOntoPlane(p1, plane);
-    SbVec3f projectedPoint2 = projectPointOntoPlane(p2, plane);
-    return SbLine(projectedPoint1, projectedPoint2);
-}
-
-SbVec3f intersection(const SbVec3f& p11, const SbVec3f& p12, const SbVec3f& p21, const SbVec3f& p22)
-{
-    SbVec3f da = p12 - p11;
-    SbVec3f db = p22 - p21;
-    SbVec3f dc = p21 - p11;
-
-    double s = (dc.cross(db)).dot(da.cross(db)) / da.cross(db).sqrLength();
-    return p11 + da * s;
-}
-
-SbVec3f View3DInventorViewer::getPointOnLine(
+SbVec3d View3DInventorViewer::getPointOnLine(
     const SbVec2s& pnt,
-    const SbVec3f& axisCenter,
-    const SbVec3f& axis
+    const SbVec3d& axisCenter,
+    const SbVec3d& axis
 ) const
 {
     SbVec2f pnt2d = getNormalizedPosition(pnt);
@@ -3862,40 +3873,58 @@ SbVec3f View3DInventorViewer::getPointOnLine(
         focalDist = 0.5F * (nearDist + farDist);  // NOLINT
     }
 
-    SbLine line;
-    SbVec3f pt, ptOnFocalPlaneAndOnLine, ptOnFocalPlane;
-    SbPlane focalPlane = vol.getPlane(focalDist);
-    vol.projectPointToLine(pnt2d, line);
-    focalPlane.intersect(line, ptOnFocalPlane);
+    SbDPLine line;
+    SbVec3d pt, ptOnFocalPlaneAndOnLine, ptOnFocalPlane;
+    if (!projectNormalizedToRayDP(vol, pnt2d, line)) {
+        return {};
+    }
 
-    // Check if line is orthogonal to the focal plane
-    SbVec3f focalPlaneNormal = focalPlane.getNormal();
-    float dotProduct = fabs(axis.dot(focalPlaneNormal));
+    const SbDPViewVolume& dpvol = vol.getDPViewVolume();
+    const SbVec3d& projDir = dpvol.getProjectionDirection();
+    const SbVec3d planeNormal = -projDir;
+    const SbVec3d planePoint = dpvol.getProjectionPoint() + projDir * static_cast<double>(focalDist);
+
+    if (!intersectRayPlaneDP(line, planePoint, planeNormal, ptOnFocalPlane)) {
+        return {};
+    }
+
+    // Check if axis is orthogonal to the focal plane
+    const double dotProduct = std::fabs(axis.dot(planeNormal));
     if (dotProduct > (1.0 - 1e-6)) {
         return ptOnFocalPlane;
     }
 
-    SbLine projectedLine = projectLineOntoPlane(axisCenter, axisCenter + axis, focalPlane);
-    ptOnFocalPlaneAndOnLine = projectedLine.getClosestPoint(ptOnFocalPlane);
+    // Project the axis onto the focal plane and take the closest point to the
+    // ray/focal-plane intersection.
+    const SbVec3d axisProj = axis - planeNormal * axis.dot(planeNormal);
+    if (axisProj.sqrLength() < std::numeric_limits<double>::epsilon()) {
+        return ptOnFocalPlane;
+    }
+    const SbVec3d toPoint = ptOnFocalPlane - axisCenter;
+    ptOnFocalPlaneAndOnLine = axisCenter + axisProj * (toPoint.dot(axisProj) / axisProj.sqrLength());
 
-    // now we need the intersection point between
-    // - the line passing by ptOnFocalPlaneAndOnLine normal to focalPlane
-    // - The line (axisCenter, axisCenter + axis)
+    // Intersect the line through that point along the plane normal with the axis line.
+    // Solve: ptOnFocalPlaneAndOnLine + s * planeNormal == axisCenter + t * axis
+    const SbVec3d w0 = ptOnFocalPlaneAndOnLine - axisCenter;
+    const double a = planeNormal.dot(planeNormal);
+    const double b = planeNormal.dot(axis);
+    const double c = axis.dot(axis);
+    const double d = planeNormal.dot(w0);
+    const double e = axis.dot(w0);
+    const double denom = a * c - b * b;
+    if (std::fabs(denom) < std::numeric_limits<double>::epsilon()) {
+        return ptOnFocalPlaneAndOnLine;
+    }
+    const double s = (b * e - c * d) / denom;
+    pt = ptOnFocalPlaneAndOnLine + planeNormal * s;
 
-    // Line normal to focal plane through ptOnFocalPlaneAndOnLine
-    SbLine normalLine(ptOnFocalPlaneAndOnLine, ptOnFocalPlaneAndOnLine + focalPlaneNormal);
-    SbLine axisLine(axisCenter, axisCenter + axis);
-    pt = intersection(
-        ptOnFocalPlaneAndOnLine,
-        ptOnFocalPlaneAndOnLine + focalPlaneNormal,
-        axisCenter,
-        axisCenter + axis
-    );
-
+    if (!std::isfinite(pt[0]) || !std::isfinite(pt[1]) || !std::isfinite(pt[2])) {
+        return {};
+    }
     return pt;
 }
 
-SbVec3f View3DInventorViewer::getPointOnFocalPlane(const SbVec2s& pnt) const
+SbVec3d View3DInventorViewer::getPointOnFocalPlane(const SbVec2s& pnt) const
 {
     SbVec2f pnt2d = getNormalizedPosition(pnt);
     SoCamera* pCam = this->getSoRenderManager()->getCamera();
@@ -3915,12 +3944,20 @@ SbVec3f View3DInventorViewer::getPointOnFocalPlane(const SbVec2s& pnt) const
         focalDist = 0.5F * (nearDist + farDist);  // NOLINT
     }
 
-    SbLine line;
-    SbVec3f pt;
-    SbPlane focalPlane = vol.getPlane(focalDist);
-    vol.projectPointToLine(pnt2d, line);
-    focalPlane.intersect(line, pt);
+    SbDPLine line;
+    if (!projectNormalizedToRayDP(vol, pnt2d, line)) {
+        return {};
+    }
 
+    const SbDPViewVolume& dpvol = vol.getDPViewVolume();
+    const SbVec3d& projDir = dpvol.getProjectionDirection();
+    const SbVec3d planeNormal = -projDir;
+    const SbVec3d planePoint = dpvol.getProjectionPoint() + projDir * static_cast<double>(focalDist);
+
+    SbVec3d pt;
+    if (!intersectRayPlaneDP(line, planePoint, planeNormal, pt)) {
+        return {};
+    }
     return pt;
 }
 
@@ -4012,10 +4049,10 @@ void View3DInventorViewer::getFarPlane(SbVec3f& rcPt, SbVec3f& rcNormal) const
     rcPt.setValue(dist * rcNormal[0], dist * rcNormal[1], dist * rcNormal[2]);
 }
 
-SbVec3f View3DInventorViewer::projectOnNearPlane(const SbVec2f& pt) const
+SbVec3d View3DInventorViewer::projectOnNearPlane(const SbVec2f& pt) const
 {
-    SbVec3f pt1;
-    SbVec3f pt2;
+    SbVec3d pt1;
+    SbVec3d pt2;
     SoCamera* cam = this->getSoRenderManager()->getCamera();
 
     // return invalid point
@@ -4024,14 +4061,18 @@ SbVec3f View3DInventorViewer::projectOnNearPlane(const SbVec2f& pt) const
     }
 
     SbViewVolume vol = cam->getViewVolume();
-    vol.projectPointToLine(pt, pt1, pt2);
+    vol.getDPViewVolume().projectPointToLine(
+        SbVec2d(static_cast<double>(pt[0]), static_cast<double>(pt[1])),
+        pt1,
+        pt2
+    );
     return pt1;
 }
 
-SbVec3f View3DInventorViewer::projectOnFarPlane(const SbVec2f& pt) const
+SbVec3d View3DInventorViewer::projectOnFarPlane(const SbVec2f& pt) const
 {
-    SbVec3f pt1;
-    SbVec3f pt2;
+    SbVec3d pt1;
+    SbVec3d pt2;
     SoCamera* cam = this->getSoRenderManager()->getCamera();
 
     // return invalid point
@@ -4040,11 +4081,15 @@ SbVec3f View3DInventorViewer::projectOnFarPlane(const SbVec2f& pt) const
     }
 
     SbViewVolume vol = cam->getViewVolume();
-    vol.projectPointToLine(pt, pt1, pt2);
+    vol.getDPViewVolume().projectPointToLine(
+        SbVec2d(static_cast<double>(pt[0]), static_cast<double>(pt[1])),
+        pt1,
+        pt2
+    );
     return pt2;
 }
 
-void View3DInventorViewer::projectPointToLine(const SbVec2s& pt, SbVec3f& pt1, SbVec3f& pt2) const
+void View3DInventorViewer::projectPointToLine(const SbVec2s& pt, SbVec3d& pt1, SbVec3d& pt2) const
 {
     SbVec2f pnt2d = getNormalizedPosition(pt);
     SoCamera* pCam = this->getSoRenderManager()->getCamera();
@@ -4054,7 +4099,11 @@ void View3DInventorViewer::projectPointToLine(const SbVec2s& pt, SbVec3f& pt1, S
     }
 
     SbViewVolume vol = pCam->getViewVolume();
-    vol.projectPointToLine(pnt2d, pt1, pt2);
+    vol.getDPViewVolume().projectPointToLine(
+        SbVec2d(static_cast<double>(pnt2d[0]), static_cast<double>(pnt2d[1])),
+        pt1,
+        pt2
+    );
 }
 
 void View3DInventorViewer::toggleClippingPlane(

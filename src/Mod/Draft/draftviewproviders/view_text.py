@@ -41,6 +41,7 @@ import FreeCADGui as Gui
 from draftutils import gui_utils
 from draftutils import params
 from draftutils.translate import translate
+from draftviewproviders.view_base import _f32
 from draftviewproviders.view_draft_annotation import ViewProviderDraftAnnotation
 
 
@@ -104,6 +105,56 @@ class ViewProviderText(ViewProviderDraftAnnotation):
         self.onChanged(vobj, "Justification")
         self.onChanged(vobj, "LineSpacing")
         self.onChanged(vobj, "ScaleMultiplier")
+        self._attach_placement_offset(vobj)
+        self._update_placement_offset(self.Object)
+
+    def _attach_placement_offset(self, vobj):
+        """Insert the sub-lattice placement correction node.
+
+        Coin stores the placement transform in single precision: at 1e9 the
+        float32 lattice spacing is 64 units, so the root SoTransform can
+        only hold ``float32(Base)`` and the glyphs land on the same
+        float32 lattice the (also float32) grid nodes sit on.  A private
+        ``SoTranslation`` inserted directly after the placement transform
+        carries ``R^-1 * (Base - float32(Base))``.  The renderer composes
+        the view and placement matrices first (their large translations
+        cancel there), so the small remainder multiplies in afterwards
+        and survives; the glyphs then land on the exact double placement.
+        """
+        if not App.GuiUp:
+            return
+        root = vobj.RootNode
+        if root is None or not hasattr(root, "getNumChildren"):
+            return
+        node = gui_utils.find_coin_node_by_name(root, "PrecisionCoordOffset")
+        if node is None:
+            node = coin.SoTranslation()
+            node.setName("PrecisionCoordOffset")
+            # Insert directly after the placement transform so the
+            # correction applies to the display mode switch and anything
+            # else parented under the root node.
+            index = 1 if root.getNumChildren() > 1 else root.getNumChildren()
+            root.insertChild(node, index)
+        self._placement_offset = node
+        return
+
+    def _update_placement_offset(self, obj):
+        """Refresh the correction from the double precision placement."""
+        node = getattr(self, "_placement_offset", None)
+        if node is None or obj is None or not hasattr(obj, "Placement"):
+            return
+        base = obj.Placement.Base
+        dx = base.x - _f32(base.x)
+        dy = base.y - _f32(base.y)
+        dz = base.z - _f32(base.z)
+        if dx == 0.0 and dy == 0.0 and dz == 0.0:
+            node.translation.setValue(0.0, 0.0, 0.0)
+            return
+        # Placement.inverse() returns a new Placement; Rotation.invert()
+        # would mutate the object's rotation in place.
+        offset = obj.Placement.inverse().Rotation.multVec(App.Vector(dx, dy, dz))
+        node.translation.setValue(offset.x, offset.y, offset.z)
+        return
 
     def updateData(self, obj, prop):
         """Execute when a property from the Proxy class is changed."""
@@ -119,6 +170,7 @@ class ViewProviderText(ViewProviderDraftAnnotation):
             if transform:
                 transform.translation.setValue(obj.Placement.Base)
                 transform.rotation.setValue(obj.Placement.Rotation.Q)
+            self._update_placement_offset(obj)
 
     def onChanged(self, vobj, prop):
         """Execute when a view property is changed."""
