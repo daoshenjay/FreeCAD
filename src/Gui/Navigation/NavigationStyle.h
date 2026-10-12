@@ -26,7 +26,7 @@
 
 #include <Inventor/C/basic.h>
 #include <Inventor/SbBox2s.h>
-#include <Inventor/SbPlane.h>
+#include <Inventor/SbDPPlane.h>
 #include <Inventor/SbRotation.h>
 #include <Inventor/SbSphere.h>
 #include <Inventor/SbTime.h>
@@ -316,7 +316,7 @@ protected:
     void panCamera(
         SoCamera* camera,
         float vpaspect,
-        const SbPlane& panplane,
+        const SbDPPlane& panplane,
         const SbVec2f& previous,
         const SbVec2f& current
     );
@@ -411,7 +411,7 @@ protected:
     SbVec2f lastmouseposition;
     SbVec2s globalPos;
     SbVec2s localPos;
-    SbPlane panningplane;
+    SbDPPlane panningplane;
     SbTime centerTime;
     SbBool lockrecenter;
     SbBool menuenabled;

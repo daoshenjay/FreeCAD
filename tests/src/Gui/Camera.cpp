@@ -8,10 +8,15 @@
 
 #include <Inventor/SbBox3f.h>
 #include <Inventor/SbBox3d.h>
+#include <Inventor/SbDPLine.h>
 #include <Inventor/SbDPMatrix.h>
+#include <Inventor/SbDPPlane.h>
+#include <Inventor/SbLine.h>
 #include <Inventor/SbMatrix.h>
+#include <Inventor/SbPlane.h>
 #include <Inventor/SbRotation.h>
 #include <Inventor/SbSphere.h>
+#include <Inventor/SbVec2f.h>
 #include <Inventor/SbVec3d.h>
 #include <Inventor/SbViewVolume.h>
 #include <Inventor/SoDB.h>
@@ -585,4 +590,102 @@ TEST_F(CameraDoublePrecision, aDegeneratePointBoxKeepsTheViewVolumeAlive)
     EXPECT_GT(camera->nearDistance.getValue(), 0.0F);
     EXPECT_GT(camera->farDistance.getValue(), camera->nearDistance.getValue());
     EXPECT_GT(camera->focalDistance.getValue(), 0.0F);
+}
+
+
+// Reproduces the NavigationStyle::panCamera unprojection math: a one-pixel
+// drag step must move the camera by ~one pixel of view height, not by a
+// float32 ULP of the absolute coordinates (64 mm at 1e9 mm).
+class CameraPanAtLargeCoordinates: public ::testing::Test
+{
+protected:
+    static void SetUpTestSuite()
+    {
+        tests::initApplication();
+        SoDB::init();
+    }
+
+    void SetUp() override
+    {
+        camera.reset(new SoOrthographicCamera);
+        // Fit-like state at (1e9, 1e9, 0): view height 6.76 mm, 849 px tall.
+        camera->position.setValue(1000000000.0, 1000000000.0, 10.0);
+        camera->height = 6.762075901031494F;
+        camera->focalDistance = 10.0F;
+        camera->nearDistance = 1.0F;
+        camera->farDistance = 100.0F;
+        aspect = 1524.0F / 849.0F;
+        camera->aspectRatio = aspect;
+    }
+
+    // One horizontal pixel in normalized [0,1] viewport coordinates.
+    static constexpr float pixelStepU = 1.0F / 1524.0F;
+
+    Gui::CoinPtr<SoOrthographicCamera> camera;
+    float aspect {};
+};
+
+TEST_F(CameraPanAtLargeCoordinates, onePixelDragsByOnePixelOfViewHeight)
+{
+    SbViewVolume vv = camera->getViewVolume(aspect);
+    const SbDPPlane panplane = vv.getPlaneDP(camera->focalDistance.getValue());
+
+    // The panning plane sits at the focal distance in front of the eye at
+    // (1e9, 1e9, 0): z == 0.
+    const SbVec3d planeNormalBefore(panplane.getNormal());
+    EXPECT_NEAR(planeNormalBefore[2], 1.0, 1e-12);
+
+    const SbVec2f prev(0.5F, 0.5F);
+    const SbVec2f curr(0.5F + pixelStepU, 0.5F);
+
+    SbDPLine line;
+    SbVec3d currentPlanept;
+    vv.projectPointToLine(curr, line);
+    ASSERT_TRUE(panplane.intersect(line, currentPlanept));
+
+    SbVec3d oldPlanept;
+    vv.projectPointToLine(prev, line);
+    ASSERT_TRUE(panplane.intersect(line, oldPlanept));
+
+    const SbVec3d delta(currentPlanept - oldPlanept);
+    const double expected = camera->height.getValue() / 849.0;
+
+    // 1e-5 mm covers the float32 viewport position ((0.5 + step) - 0.5);
+    // the world-coordinate math itself is double and stays sub-ULP.
+    EXPECT_NEAR(delta[0], expected, 1e-5);
+    EXPECT_NEAR(delta[1], 0.0, 1e-5);
+    EXPECT_NEAR(delta[2], 0.0, 1e-5);
+
+    // The step must be sub-ULP of the absolute coordinate, not a jump.
+    EXPECT_LT(std::abs(delta[0]), 64.0);
+}
+
+TEST_F(CameraPanAtLargeCoordinates, theF32UnprojectionPathQuantizesToSixtyFourMillimeters)
+{
+    // Documents the bug this suite guards: the legacy float32 path snaps the
+    // one-pixel drag to the 64 mm float32 grid at 1e9 mm.
+    SbViewVolume vv = camera->getViewVolume(aspect);
+    const SbPlane panplane = vv.getPlane(camera->focalDistance.getValue());
+
+    const SbVec2f prev(0.5F, 0.5F);
+    const SbVec2f curr(0.5F + pixelStepU, 0.5F);
+
+    SbLine line;
+    SbVec3f currentPlanept;
+    vv.projectPointToLine(curr, line);
+    panplane.intersect(line, currentPlanept);
+
+    SbVec3f oldPlanept;
+    vv.projectPointToLine(prev, line);
+    panplane.intersect(line, oldPlanept);
+
+    const SbVec3f delta(currentPlanept - oldPlanept);
+
+    // One 8 µm step cannot survive the 64 mm float32 grid at 1e9 mm: both
+    // unprojections snap to the same grid point and the drag is lost (or,
+    // crossing a grid boundary, it jumps a full ULP away). Either way the
+    // sub-pixel truth -- height / 849 px -- is unrepresentable.
+    const double expected = camera->height.getValue() / 849.0;
+    EXPECT_TRUE(std::abs(delta[0]) < 1e-3 || std::abs(delta[0]) > 32.0);
+    EXPECT_NE(static_cast<double>(delta[0]), expected);
 }

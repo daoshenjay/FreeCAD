@@ -22,6 +22,7 @@
  ***************************************************************************/
 
 
+#include <Inventor/SbDPLine.h>
 #include <Inventor/SbViewportRegion.h>
 #include <Inventor/SoEventManager.h>
 #include <Inventor/SoPickedPoint.h>
@@ -607,9 +608,15 @@ void NavigationStyle::lookAtPoint(const SbVec2s screenpos)
             vv.scale(1.0 / aspectratio);
         }
 
-        SbLine line;
+        SbDPLine line;
         vv.projectPointToLine(normalizePixelPos(screenpos), line);
-        panningplane.intersect(line, point);
+        // Compute the intersection in double precision (the pan plane and
+        // the projected ray both carry absolute scene coordinates; f32
+        // endpoints/intersections quantize to the float32 ULP at large
+        // coordinates), and narrow only at the f32 API boundary below.
+        SbVec3d pointd;
+        panningplane.intersect(line, pointd);
+        point = SbVec3f(pointd);
     }
 
     lookAtPoint(point);
@@ -730,7 +737,7 @@ void NavigationStyle::boxZoom(const SbBox2s& box)
         (float)(size[1] - (ymin + ymax) / 2) / (float)std::max((int)(size[1] - 1), 1)
     );
 
-    SbPlane plane = vv.getPlane(cam->focalDistance.getValue());
+    SbDPPlane plane = vv.getPlaneDP(cam->focalDistance.getValue());
     panCamera(cam, vp.getViewportAspectRatio(), plane, SbVec2f(0.5, 0.5), center);
 
     // Set height or height angle of the camera
@@ -915,7 +922,7 @@ void NavigationStyle::reorientCamera(
 void NavigationStyle::panCamera(
     SoCamera* cam,
     float aspectratio,
-    const SbPlane& panplane,
+    const SbDPPlane& panplane,
     const SbVec2f& currpos,
     const SbVec2f& prevpos
 )
@@ -936,17 +943,21 @@ void NavigationStyle::panCamera(
         vv.scale(1.0 / aspectratio);
     }
 
-    SbLine line;
+    // Unproject and intersect in double precision: the pan plane sits at
+    // absolute scene coordinates, so f32 ray endpoints/intersections
+    // quantize to the float32 ULP there (64mm at 1e9mm) and the camera
+    // would jump by one ULP per mouse step.
+    SbDPLine line;
     vv.projectPointToLine(currpos, line);
-    SbVec3f current_planept;
+    SbVec3d current_planept;
     panplane.intersect(line, current_planept);
     vv.projectPointToLine(prevpos, line);
-    SbVec3f old_planept;
+    SbVec3d old_planept;
     panplane.intersect(line, old_planept);
 
     // Reposition camera according to the vector difference between the
     // projected points.
-    cam->position = cam->position.getValue() - SbVec3d(current_planept - old_planept);
+    cam->position = cam->position.getValue() - (current_planept - old_planept);
 
     if (this->currentmode != NavigationStyle::IDLE) {
         hasPanned = true;
@@ -959,7 +970,7 @@ void NavigationStyle::setupPanningPlane(const SoCamera* camera)
     // coordinates should stay the same during the whole pan
     // operation, so we should calculate this value here.
     if (!camera) {  // can happen for empty scenegraph
-        this->panningplane = SbPlane(SbVec3f(0, 0, 1), 0);
+        this->panningplane = SbDPPlane(SbVec3d(0, 0, 1), 0.0);
     }
     else {
         const SbViewportRegion& vp = viewer->getViewportRegion();
@@ -971,7 +982,10 @@ void NavigationStyle::setupPanningPlane(const SoCamera* camera)
             vv.scale(1.0 / aspectratio);
         }
 
-        this->panningplane = vv.getPlane(camera->focalDistance.getValue());
+        // Keep the plane in double precision: its offset (~dot(normal,
+        // point)) carries the absolute scene coordinates and would be
+        // quantized to the float32 ULP by getPlane().
+        this->panningplane = vv.getPlaneDP(camera->focalDistance.getValue());
     }
 }
 
@@ -1120,7 +1134,7 @@ void NavigationStyle::doZoom(SoCamera* camera, float logfactor, const SbVec2f& p
         const SbViewportRegion& vp = viewer->getSoRenderManager()->getViewportRegion();
         float ratio = vp.getViewportAspectRatio();
         SbViewVolume vv = camera->getViewVolume(vp.getViewportAspectRatio());
-        SbPlane panplane = vv.getPlane(camera->focalDistance.getValue());
+        SbDPPlane panplane = vv.getPlaneDP(camera->focalDistance.getValue());
         panCamera(viewer->getSoRenderManager()->getCamera(), ratio, panplane, SbVec2f(0.5, 0.5), pos);
     }
 
@@ -1130,7 +1144,7 @@ void NavigationStyle::doZoom(SoCamera* camera, float logfactor, const SbVec2f& p
         const SbViewportRegion& vp = viewer->getSoRenderManager()->getViewportRegion();
         float ratio = vp.getViewportAspectRatio();
         SbViewVolume vv = camera->getViewVolume(vp.getViewportAspectRatio());
-        SbPlane panplane = vv.getPlane(camera->focalDistance.getValue());
+        SbDPPlane panplane = vv.getPlaneDP(camera->focalDistance.getValue());
         panCamera(viewer->getSoRenderManager()->getCamera(), ratio, panplane, pos, SbVec2f(0.5, 0.5));
 
         // Change the position of the rotation center indicator after zooming at cursor
@@ -1167,7 +1181,7 @@ void NavigationStyle::doRotate(SoCamera* camera, float angle, const SbVec2f& pos
         const SbViewportRegion& vp = viewer->getSoRenderManager()->getViewportRegion();
         float ratio = vp.getViewportAspectRatio();
         SbViewVolume vv = camera->getViewVolume(vp.getViewportAspectRatio());
-        SbPlane panplane = vv.getPlane(camera->focalDistance.getValue());
+        SbDPPlane panplane = vv.getPlaneDP(camera->focalDistance.getValue());
         panCamera(viewer->getSoRenderManager()->getCamera(), ratio, panplane, SbVec2f(0.5, 0.5), pos);
     }
 
@@ -1183,7 +1197,7 @@ void NavigationStyle::doRotate(SoCamera* camera, float angle, const SbVec2f& pos
         const SbViewportRegion& vp = viewer->getSoRenderManager()->getViewportRegion();
         float ratio = vp.getViewportAspectRatio();
         SbViewVolume vv = camera->getViewVolume(vp.getViewportAspectRatio());
-        SbPlane panplane = vv.getPlane(camera->focalDistance.getValue());
+        SbDPPlane panplane = vv.getPlaneDP(camera->focalDistance.getValue());
         panCamera(viewer->getSoRenderManager()->getCamera(), ratio, panplane, pos, SbVec2f(0.5, 0.5));
     }
 }
@@ -1593,14 +1607,14 @@ void NavigationStyle::saveCursorPosition(const SoEvent* const ev)
         }
         SbViewVolume vv = cam->getViewVolume(ratio);
 
-        SbLine line;
+        SbDPLine line;
         SbVec2f currpos = ev->getNormalizedPosition(vp);
         vv.projectPointToLine(currpos, line);
-        SbVec3f current_planept;
-        SbPlane panplane = vv.getPlane(cam->focalDistance.getValue());
-        panplane.intersect(line, current_planept);
+        SbVec3d current_planeptd;
+        SbDPPlane panplane = vv.getPlaneDP(cam->focalDistance.getValue());
+        panplane.intersect(line, current_planeptd);
 
-        setRotationCenter(current_planept);
+        setRotationCenter(SbVec3f(current_planeptd));
     }
 
     // mode is BoundingBoxCenter or a ScenePointAtCursor failed
