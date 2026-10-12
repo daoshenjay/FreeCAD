@@ -7,12 +7,18 @@
 #include <cmath>
 
 #include <Inventor/SbBox3f.h>
+#include <Inventor/SbBox3d.h>
+#include <Inventor/SbDPMatrix.h>
 #include <Inventor/SbMatrix.h>
 #include <Inventor/SbRotation.h>
 #include <Inventor/SbSphere.h>
+#include <Inventor/SbVec3d.h>
 #include <Inventor/SbViewVolume.h>
 #include <Inventor/SoDB.h>
+#include <Inventor/actions/SoCallbackAction.h>
+#include <Inventor/elements/SoViewingMatrixElement.h>
 #include <Inventor/nodes/SoOrthographicCamera.h>
+#include <Inventor/nodes/SoPerspectiveCamera.h>
 #include <Base/Converter.h>
 #include <Base/Tools.h>
 #include <Gui/Camera.h>
@@ -175,11 +181,11 @@ void expectFitDeclines(SoOrthographicCamera& camera, const SbBox3f& box)
     camera.position.setValue(7.0F, 8.0F, 9.0F);
     camera.height.setValue(42.0F);
 
-    Gui::Camera::fitToBox(camera, box, 1.0F);
+    Gui::Camera::fitToBox(camera, SbBox3d(box), 1.0F);
 
     EXPECT_FLOAT_EQ(camera.height.getValue(), 42.0F);
 
-    const SbVec3f position = camera.position.getValue();
+    const SbVec3f position(camera.position.getValue());
     EXPECT_FLOAT_EQ(position[0], 7.0F);
     EXPECT_FLOAT_EQ(position[1], 8.0F);
     EXPECT_FLOAT_EQ(position[2], 9.0F);
@@ -309,11 +315,11 @@ TEST_F(CameraFitToBox, aCubeIsFramedWithTheMargin)
     // The default orientation looks down -Z, so camera space is world space.
     const SbBox3f box(-1.0F, -1.0F, -1.0F, 1.0F, 1.0F, 1.0F);
 
-    Gui::Camera::fitToBox(*camera, box, 1.0F);
+    Gui::Camera::fitToBox(*camera, SbBox3d(box), 1.0F);
 
     EXPECT_FLOAT_EQ(camera->height.getValue(), 2.0F * Gui::Camera::fitMargin);
 
-    const SbVec3f position = camera->position.getValue();
+    const SbVec3f position(camera->position.getValue());
     EXPECT_FLOAT_EQ(position[0], 0.0F);
     EXPECT_FLOAT_EQ(position[1], 0.0F);
     EXPECT_FLOAT_EQ(position[2], std::sqrt(3.0F));
@@ -325,7 +331,7 @@ TEST_F(CameraFitToBox, noCornerIsClipped)
     camera->orientation.setValue(Gui::Camera::rotation(Gui::Camera::Dimetric));
     const SbBox3f box(-30.0F, -8.0F, -12.0F, 70.0F, 22.0F, 5.0F);
 
-    Gui::Camera::fitToBox(*camera, box, 1.6F);
+    Gui::Camera::fitToBox(*camera, SbBox3d(box), 1.6F);
 
     EXPECT_LE(largestNormalizedExtent(*camera, box, 1.6F), 1.0F);
 }
@@ -337,7 +343,7 @@ TEST_F(CameraFitToBox, theClippingPlanesClearTheScene)
     camera->orientation.setValue(Gui::Camera::rotation(Gui::Camera::Isometric));
     const SbBox3f box(-1.0F, -1.0F, -1.0F, 1.0F, 1.0F, 1.0F);
 
-    Gui::Camera::fitToBox(*camera, box, 1.0F);
+    Gui::Camera::fitToBox(*camera, SbBox3d(box), 1.0F);
 
     EXPECT_LT(largestNormalizedDepth(*camera, box, 1.0F), 1.0F);
 }
@@ -347,7 +353,7 @@ TEST_F(CameraFitToBox, theContentReachesTheMargin)
     camera->orientation.setValue(Gui::Camera::rotation(Gui::Camera::Isometric));
     const SbBox3f box(-30.0F, -8.0F, -12.0F, 70.0F, 22.0F, 5.0F);
 
-    Gui::Camera::fitToBox(*camera, box, 1.0F);
+    Gui::Camera::fitToBox(*camera, SbBox3d(box), 1.0F);
 
     // A circumscribing-sphere fit leaves this well short of the margin.
     EXPECT_NEAR(largestNormalizedExtent(*camera, box, 1.0F), 1.0F / Gui::Camera::fitMargin, 1e-4F);
@@ -360,12 +366,12 @@ TEST_F(CameraFitToBox, aTranslatedBoxFramesIdentically)
     const SbVec3f offset(100.0F, -50.0F, 25.0F);
     const SbBox3f moved(box.getMin() + offset, box.getMax() + offset);
 
-    Gui::Camera::fitToBox(*camera, box, 1.0F);
+    Gui::Camera::fitToBox(*camera, SbBox3d(box), 1.0F);
     const float heightAtOrigin = camera->height.getValue();
-    const SbVec3f positionAtOrigin = camera->position.getValue();
+    const SbVec3f positionAtOrigin(camera->position.getValue());
 
-    Gui::Camera::fitToBox(*camera, moved, 1.0F);
-    const SbVec3f movedPosition = camera->position.getValue();
+    Gui::Camera::fitToBox(*camera, SbBox3d(moved), 1.0F);
+    const SbVec3f movedPosition(camera->position.getValue());
 
     EXPECT_FLOAT_EQ(camera->height.getValue(), heightAtOrigin);
     EXPECT_NEAR(movedPosition[0], positionAtOrigin[0] + offset[0], 1e-3F);
@@ -378,7 +384,7 @@ TEST_F(CameraFitToBox, anElongatedRodBeatsTheSphereFit)
     camera->orientation.setValue(Gui::Camera::rotation(Gui::Camera::Isometric));
     const SbBox3f rod(-0.5F, -0.5F, -50.0F, 0.5F, 0.5F, 50.0F);
 
-    Gui::Camera::fitToBox(*camera, rod, 1.0F);
+    Gui::Camera::fitToBox(*camera, SbBox3d(rod), 1.0F);
 
     SbSphere circumscribed;
     circumscribed.circumscribe(rod);
@@ -388,18 +394,58 @@ TEST_F(CameraFitToBox, anElongatedRodBeatsTheSphereFit)
     EXPECT_NEAR(largestNormalizedExtent(*camera, rod, 1.0F), 1.0F / Gui::Camera::fitMargin, 1e-4F);
 }
 
+TEST_F(CameraFitToBox, aLargeCoordinateRodKeepsSubULPDetail)
+{
+    // An 8 mm rod at x = y = 1e9 mm: the rod is degenerate in X and Y, so the
+    // circumscribing-sphere radius is dominated by the float32 rounding of the
+    // absolute coordinates. The fit must keep the camera on the rod rather
+    // than let the float32 rounding of the corner coordinates collapse the
+    // camera position to the world origin.
+    const SbBox3d rod(1000000000.0, 1000000000.0, -4.0,
+                      1000000000.0, 1000000000.0, 4.0);
+    camera->position.setValue(7.0F, 8.0F, 9.0F);
+
+    Gui::Camera::fitToBox(*camera, rod, 1.0F);
+
+    // The rod is degenerate in X and Y, so the fit declines and leaves the
+    // camera alone: it must not collapse the camera to the world origin.
+    const SbVec3d position(camera->position.getValue());
+    EXPECT_FLOAT_EQ(position[0], 7.0F);
+    EXPECT_FLOAT_EQ(position[1], 8.0F);
+    EXPECT_FLOAT_EQ(position[2], 9.0F);
+}
+
+TEST_F(CameraFitToBox, aLargeCoordinatePointRodDeclinesTheDegenerateFit)
+{
+    // A point rod (X, Y and Z all degenerate in camera space after projection)
+    // must leave the camera alone rather than collapse the view volume.
+    const SbBox3d point(1000000000.0, 1000000000.0, 5.0,
+                        1000000000.0, 1000000000.0, 5.0);
+    camera->orientation.setValue(Gui::Camera::rotation(Gui::Camera::Isometric));
+    camera->position.setValue(7.0F, 8.0F, 9.0F);
+    camera->height.setValue(42.0F);
+
+    Gui::Camera::fitToBox(*camera, point, 1.0F);
+
+    EXPECT_FLOAT_EQ(camera->height.getValue(), 42.0F);
+    const SbVec3d position(camera->position.getValue());
+    EXPECT_FLOAT_EQ(position[0], 7.0F);
+    EXPECT_FLOAT_EQ(position[1], 8.0F);
+    EXPECT_FLOAT_EQ(position[2], 9.0F);
+}
+
 TEST_F(CameraFitToBox, theAspectRatioDecidesWhichExtentConstrains)
 {
     // Half extents are 2 across and 1 up in camera space.
     const SbBox3f box(-2.0F, -1.0F, -1.0F, 2.0F, 1.0F, 1.0F);
 
-    Gui::Camera::fitToBox(*camera, box, 1.0F);
+    Gui::Camera::fitToBox(*camera, SbBox3d(box), 1.0F);
     EXPECT_FLOAT_EQ(camera->height.getValue(), 4.0F * Gui::Camera::fitMargin);
 
-    Gui::Camera::fitToBox(*camera, box, 2.0F);
+    Gui::Camera::fitToBox(*camera, SbBox3d(box), 2.0F);
     EXPECT_FLOAT_EQ(camera->height.getValue(), 2.0F * Gui::Camera::fitMargin);
 
-    Gui::Camera::fitToBox(*camera, box, 0.5F);
+    Gui::Camera::fitToBox(*camera, SbBox3d(box), 0.5F);
     EXPECT_FLOAT_EQ(camera->height.getValue(), 8.0F * Gui::Camera::fitMargin);
 }
 
@@ -412,4 +458,131 @@ TEST_F(CameraFitToBox, aPointBoxLeavesTheCameraAlone)
 {
     // A single-point scene is a valid bounding box, not an empty one, so it reaches the fit.
     expectFitDeclines(*camera, SbBox3f(3.0F, 4.0F, 5.0F, 3.0F, 4.0F, 5.0F));
+}
+
+
+class CameraDoublePrecision: public ::testing::Test
+{
+protected:
+    static void SetUpTestSuite()
+    {
+        tests::initApplication();
+        SoDB::init();  // idempotent; constructing a Coin node needs the type database
+    }
+
+    void SetUp() override
+    {
+        camera.reset(new SoPerspectiveCamera);
+    }
+
+    Gui::CoinPtr<SoPerspectiveCamera> camera;
+};
+
+TEST_F(CameraDoublePrecision, thePositionKeepsSubULPDetailAtLargeCoordinates)
+{
+    // The float32 grid at 1e9 mm has a spacing of 64 mm; the camera position
+    // must not be quantized to it.
+    camera->position.setValue(1000000008.0, 1000000000.0, -0.005);
+
+    const SbVec3d actual(camera->position.getValue());
+    EXPECT_DOUBLE_EQ(actual[0], 1000000008.0);
+    EXPECT_DOUBLE_EQ(actual[1], 1000000000.0);
+    EXPECT_DOUBLE_EQ(actual[2], -0.005);
+}
+
+TEST_F(CameraDoublePrecision, theViewingMatrixCarriesThePositionInFull)
+{
+    camera->position.setValue(1000000008.0, 1000000000.0, 0.0);
+
+    SoCallbackAction action;
+    action.apply(&*camera);
+
+    const SbDPMatrix & viewing = SoViewingMatrixElement::getDP(action.getState());
+    // The default orientation looks down -Z, so the viewing matrix is a plain
+    // inverse translation of the camera position, in row-vector convention.
+    EXPECT_DOUBLE_EQ(viewing[3][0], -1000000008.0);
+    EXPECT_DOUBLE_EQ(viewing[3][1], -1000000000.0);
+    EXPECT_DOUBLE_EQ(viewing[3][2], 0.0);
+
+    // The float32 copy that legacy consumers read has already lost the detail.
+    const SbMatrix & lossy = SoViewingMatrixElement::get(action.getState());
+    EXPECT_NE(static_cast<double>(lossy[3][0]), -1000000008.0);
+}
+
+TEST_F(CameraDoublePrecision, fittingALargeCoordinateBoxReachesTheBox)
+{
+    // An 8 mm segment at x = y = 1e9 mm. The float32 bounding box collapses
+    // the lateral extents, so the fit frames the segment along Z.
+    const SbBox3f box(1000000000.0F, 1000000000.0F, -4.0F,
+                      1000000000.0F, 1000000000.0F, 4.0F);
+
+    camera->viewBoundingBox(box, 1.0F, 1.0F);
+
+    const SbVec3d position(camera->position.getValue());
+    const double reach = 4.0 / std::tan(camera->heightAngle.getValue() / 2.0);
+
+    EXPECT_DOUBLE_EQ(position[0], 1000000000.0);
+    EXPECT_DOUBLE_EQ(position[1], 1000000000.0);
+    EXPECT_NEAR(position[2], reach, 1e-6);
+
+    // The view distance must be on the order of the object, not a fixed
+    // guard distance such as the former 2 * float32 ULP (128 mm).
+    EXPECT_LT(std::abs(position[2]), 100.0);
+}
+
+TEST_F(CameraDoublePrecision, fittingAFlatXYBoxAtLargeCoordinates)
+{
+    // The blind spot of fittingALargeCoordinateBoxReachesTheBox: that box is
+    // degenerate along X/Y, so the fit could only ever prove the Z axis. A
+    // 6.76 mm box lying in the XY plane at 1e9 mm would collapse to a point
+    // with float32 box coordinates: the camera would end up at the box
+    // center with near == far == focalDistance == 0 -- an invisible scene
+    // and a zoom that cannot recover.
+    const SbBox3d box(1000000000.0, 1000000000.0, -1.0,
+                      1000000006.76, 1000000003.0, 1.0);
+
+    camera->viewBoundingBox(box, 1.0, 1.0);
+
+    const SbVec3d position(camera->position.getValue());
+    const SbVec3d center(1000000003.38, 1000000001.5, 0.0);
+    const SbVec3d halfdiag(6.76, 3.0, 2.0);
+    const double radius = 0.5 * halfdiag.length();
+    const double reach = radius / std::tan(camera->heightAngle.getValue() / 2.0);
+
+    // The default orientation looks down -Z, so the camera sits exactly on
+    // the box center line and one bounding sphere radius away in direction.
+    EXPECT_DOUBLE_EQ(position[0], center[0]);
+    EXPECT_DOUBLE_EQ(position[1], center[1]);
+    EXPECT_NEAR(position[2], reach, 1e-6);
+
+    // The fit must stay on the order of the geometry, not of the coordinate.
+    EXPECT_LT(reach, 100.0);
+
+    // The view volume must actually exist.
+    EXPECT_GT(camera->nearDistance.getValue(), 0.0F);
+    EXPECT_GT(camera->farDistance.getValue(), camera->nearDistance.getValue());
+    EXPECT_GT(camera->focalDistance.getValue(), 0.0F);
+}
+
+TEST_F(CameraDoublePrecision, aDegeneratePointBoxKeepsTheViewVolumeAlive)
+{
+    // A point box must not collapse the view volume to
+    // near == far == focalDistance == 0.
+    const SbBox3d box(1000000000.0, 1000000000.0, 5.0,
+                      1000000000.0, 1000000000.0, 5.0);
+
+    camera->viewBoundingBox(box, 1.0, 1.0);
+
+    const SbVec3d position(camera->position.getValue());
+    EXPECT_DOUBLE_EQ(position[0], 1000000000.0);
+    EXPECT_DOUBLE_EQ(position[1], 1000000000.0);
+
+    // The scale relative radius floor (1e-9 * |coordinate| = 1 mm at 1e9)
+    // puts the camera a few millimeters off the point.
+    EXPECT_GT(position[2], 5.0);
+    EXPECT_LT(position[2] - 5.0, 10.0);
+
+    EXPECT_GT(camera->nearDistance.getValue(), 0.0F);
+    EXPECT_GT(camera->farDistance.getValue(), camera->nearDistance.getValue());
+    EXPECT_GT(camera->focalDistance.getValue(), 0.0F);
 }

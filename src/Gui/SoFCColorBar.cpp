@@ -613,7 +613,7 @@ float SoFCColorBar::getBoundingWidth(const SbVec2s& size)
     }
 
     auto camera = new SoOrthographicCamera;
-    camera->position = SbVec3f(0.0F, 0.0F, 5.0F);
+    camera->position = SbVec3d(0.0, 0.0, 5.0);
     camera->height = 10.0F;
     camera->nearDistance = 0.0F;
     camera->farDistance = 10.0F;

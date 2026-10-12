@@ -210,6 +210,30 @@ protected:
     void onChanged(const App::Property* prop) override;
     bool loadParameter();
     void updateVisual();
+    /** Double precision bounding box for shapes.
+     *
+     * The generic implementation measures the Coin scene graph, whose
+     * vertex coordinates are float32: at large coordinates (e.g. 1e9 mm)
+     * the float32 ULP is 64 mm, so any geometry smaller than that
+     * collapses to a point and fitting the camera to it fails. The shape
+     * itself stores double precision coordinates, so queries that can be
+     * answered from the shape are answered here; everything else falls
+     * back to the Coin based implementation.
+     *
+     * Semantics match ViewProvider::_getBoundingBox(): with
+     * \a transform the object's own placement is included, without it the
+     * box is relative to the placement (callers then compose it with
+     * their own matrix). Element subnames (e.g. "Edge1") are always
+     * resolved without the object's own placement, like the Coin element
+     * path in ViewProviderDocumentObject::_getBoundingBox().
+     */
+    Base::BoundBox3d _getBoundingBox(
+        const char* subname = 0,
+        const Base::Matrix4D* mat = 0,
+        bool transform = true,
+        const Gui::View3DInventorViewer* viewer = 0,
+        int depth = 0
+    ) const override;
     void handleChangedPropertyName(
         Base::XMLReader& reader,
         const char* TypeName,

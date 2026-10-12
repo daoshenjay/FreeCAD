@@ -677,7 +677,7 @@ std::shared_ptr<NavigationAnimation> NavigationStyle::setCameraOrientation(
 
     // Reposition camera so the rotation center stays in the same place
     // Optionally add translation to move to center
-    camera->position = focalPoint + newRotationCenterDistance + translation;
+    camera->position = SbVec3d(focalPoint + newRotationCenterDistance + translation);
 
     return {};
 }
@@ -698,7 +698,7 @@ std::shared_ptr<NavigationAnimation> NavigationStyle::translateCamera(const SbVe
 
     // or set the pose directly
 
-    camera->position = camera->position.getValue() + translation;
+    camera->position = camera->position.getValue() + SbVec3d(translation);
 
     return {};
 }
@@ -752,13 +752,13 @@ void NavigationStyle::scale(float factor)
     SbVec3f initCenter = viewer->getFocalPoint();
 
     // Move the camera to the origin for scaling
-    cam->position = cam->position.getValue() - initCenter;
+    cam->position = cam->position.getValue() - SbVec3d(initCenter);
 
     // Scale the view
     doScale(cam, factor);
 
     // Move the camera back to it's initial position scaled
-    cam->position = cam->position.getValue() + initCenter * factor;
+    cam->position = cam->position.getValue() + SbVec3d(initCenter) * double(factor);
 }
 
 void NavigationStyle::viewAll()
@@ -853,7 +853,7 @@ void NavigationStyle::reorientCamera(
     // Distance from rotation center to camera position in camera coordinate system
     SbVec3f rotationCenterDistanceCam;
     currentOrientation.inverse().multVec(
-        camera->position.getValue() - rotationCenter,
+        SbVec3f(camera->position.getValue() - SbVec3d(rotationCenter)),
         rotationCenterDistanceCam
     );
 
@@ -865,7 +865,7 @@ void NavigationStyle::reorientCamera(
     camera->orientation.getValue().multVec(rotationCenterDistanceCam, newRotationCenterDistance);
 
     // Reposition camera so the rotation center stays in the same place
-    camera->position = rotationCenter + newRotationCenterDistance;
+    camera->position = SbVec3d(rotationCenter) + SbVec3d(newRotationCenterDistance);
 
     if (camera->getTypeId().isDerivedFrom(SoOrthographicCamera::getClassTypeId())) {
         // Adjust the camera position to keep the focal point in the same place while making sure
@@ -883,7 +883,7 @@ void NavigationStyle::reorientCamera(
 #else
         constexpr float orthographicFocalDistance = 1;
 #endif
-        camera->position = viewer->getFocalPoint() - orthographicFocalDistance * direction;
+        camera->position = SbVec3d(viewer->getFocalPoint()) - SbVec3d(direction) * double(orthographicFocalDistance);
         camera->focalDistance = orthographicFocalDistance;
     }
 
@@ -946,7 +946,7 @@ void NavigationStyle::panCamera(
 
     // Reposition camera according to the vector difference between the
     // projected points.
-    cam->position = cam->position.getValue() - (current_planept - old_planept);
+    cam->position = cam->position.getValue() - SbVec3d(current_planept - old_planept);
 
     if (this->currentmode != NavigationStyle::IDLE) {
         hasPanned = true;
@@ -1028,8 +1028,8 @@ void NavigationStyle::zoom(SoCamera* cam, float diffvalue)
         SbVec3f direction;
         cam->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
 
-        const SbVec3f oldpos = cam->position.getValue();
-        const SbVec3f newpos = oldpos + (newfocaldist - oldfocaldist) * -direction;
+        const SbVec3d oldpos = cam->position.getValue();
+        const SbVec3d newpos = oldpos + SbVec3d(-direction) * double(newfocaldist - oldfocaldist);
 
         // This catches a rather common user interface "buglet": if the
         // user zooms the camera out to a distance from origo larger than
@@ -1045,7 +1045,7 @@ void NavigationStyle::zoom(SoCamera* cam, float diffvalue)
         // should also check distorigo with isinf() and isnan() (or
         // inversely; isinfite()), but those only became standardized with
         // C99.)
-        const float distorigo = newpos.length();
+        const float distorigo = float(newpos.length());
         // sqrt(FLT_MAX) == ~ 1e+19, which should be both safe for further
         // calculations and ok for the end-user and app-programmer.
         float maxDistance = std::sqrt(std::numeric_limits<float>::max());
@@ -1210,12 +1210,12 @@ void NavigationStyle::setRotationCenter(const SbVec3f& cnt)
         camera->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
 
         // Calculate distance from camera to rotation center
-        const auto rotationCenterDistance = rotationCenter - camera->position.getValue();
-        const auto rotationCenterDepth = rotationCenterDistance.dot(direction);
+        const auto rotationCenterDistance = SbVec3d(rotationCenter) - camera->position.getValue();
+        const auto rotationCenterDepth = rotationCenterDistance.dot(SbVec3d(direction));
 
         // Set focal distance to match rotation center depth so we can zoom at the new rotation
         // center with a perspective camera
-        camera->focalDistance.setValue(rotationCenterDepth);
+        camera->focalDistance.setValue(float(rotationCenterDepth));
     }
 }
 
@@ -1494,16 +1494,16 @@ void NavigationStyle::applyOrbitDragCameraConstraints(const OrbitDragState& stat
     SbVec3f direction;
     camera->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
 
-    SbVec3f cameraPosition = camera->position.getValue();
-    float centerDepth = (state.center - cameraPosition).dot(direction);
+    SbVec3d cameraPosition = camera->position.getValue();
+    double centerDepth = (SbVec3d(state.center) - cameraPosition).dot(SbVec3d(direction));
     if (state.minDistance > 0.0F && centerDepth < state.minDistance) {
-        cameraPosition -= (state.minDistance - centerDepth) * direction;
+        cameraPosition -= SbVec3d(direction) * double(state.minDistance - centerDepth);
         camera->position = cameraPosition;
         centerDepth = state.minDistance;
     }
 
-    if (centerDepth > 0.0F) {
-        camera->focalDistance = centerDepth;
+    if (centerDepth > 0.0) {
+        camera->focalDistance = float(centerDepth);
     }
 
     if (state.clippingRadius <= 0.0F || centerDepth <= 0.0F) {
@@ -1514,8 +1514,9 @@ void NavigationStyle::applyOrbitDragCameraConstraints(const OrbitDragState& stat
         ? std::max(state.clippingRadius * 1.0e-4F, 1.0e-5F)
         : 0.0F;
     const float minClipSpan = std::max(state.clippingRadius * 1.0e-3F, 1.0e-4F);
-    const float nearDistance = std::max(minNearDistance, centerDepth - state.clippingRadius);
-    const float farDistance = std::max(centerDepth + state.clippingRadius, nearDistance + minClipSpan);
+    const float centerDepthF = float(centerDepth);
+    const float nearDistance = std::max(minNearDistance, centerDepthF - state.clippingRadius);
+    const float farDistance = std::max(centerDepthF + state.clippingRadius, nearDistance + minClipSpan);
     camera->nearDistance = nearDistance;
     camera->farDistance = farDistance;
 }
@@ -2429,7 +2430,7 @@ SbBool NavigationStyle::processMotionEvent(const SoMotion3Event* const ev)
         // Reposition the camera so the rotation center stays in the same place
         SbVec3f rotationCenterDistanceCam;
         currentRotation.inverse().multVec(
-            camera->position.getValue() - motionRotationCenter,
+            SbVec3f(camera->position.getValue() - SbVec3d(motionRotationCenter)),
             rotationCenterDistanceCam
         );
 
@@ -2453,7 +2454,7 @@ SbBool NavigationStyle::processMotionEvent(const SoMotion3Event* const ev)
 
     camera->enableNotify(false);
     setCameraOrientationValue(camera, newRotation, OrientationChangeSource::Interactive);
-    camera->position = finalPosition;
+    camera->position = SbVec3d(finalPosition);
     camera->enableNotify(true);
     camera->touch();
 

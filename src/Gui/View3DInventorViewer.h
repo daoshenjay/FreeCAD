@@ -36,6 +36,7 @@
 #include <Inventor/SbRotation.h>
 #include <Inventor/SbTime.h>
 #include <Inventor/SbVec3d.h>
+#include <Inventor/SbBox3d.h>
 #include <Inventor/nodes/SoEnvironment.h>
 #include <Inventor/nodes/SoEventCallback.h>
 #include <Inventor/nodes/SoRotation.h>
@@ -531,6 +532,7 @@ public:
     void viewAll() override;
     void viewAll(float factor);
     void viewBoundBox(const SbBox3f& box);
+    void viewBoundBox(const SbBox3d& box);
 
     /**
      * Returns the bounding box of the scene graph.
@@ -599,7 +601,6 @@ public:
 
     virtual PyObject* getPyObject();
 
-    bool getSceneBoundBox(SbBox3f& box) const;
     bool getSceneBoundBox(Base::BoundBox3d& box) const;
 
 Q_SIGNALS:
@@ -611,7 +612,7 @@ protected:
     void renderRubberbandOverlay();
     void renderFramebuffer();
     void renderGLImage();
-    void animatedViewAll(const SbBox3f& bbox, int steps, int ms);
+    void animatedViewAll(const SbBox3d& bbox, int steps, int ms);
     void actualRedraw() override;
     void setSeekMode(bool on) override;
     void afterRealizeHook() override;

@@ -202,7 +202,7 @@ void DemoMode::reorientCamera(SoCamera* cam, const SbRotation& rot)
     // Reposition camera so we are still pointing at the same old focal point.
     SbVec3f direction;
     cam->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
-    cam->position = focalpoint - cam->focalDistance.getValue() * direction;
+    cam->position = SbVec3d(focalpoint) - SbVec3d(direction) * double(cam->focalDistance.getValue());
 }
 
 void DemoMode::onSpeedSliderValueChanged(int v)

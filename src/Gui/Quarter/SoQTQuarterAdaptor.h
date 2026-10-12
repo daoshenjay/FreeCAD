@@ -166,7 +166,7 @@ private:
     SoTimerSensor* m_seeksensor = nullptr;
     float m_seekperiod = 0.0F;
     bool m_inseekmode = false;
-    SbVec3f m_camerastartposition, m_cameraendposition;
+    SbVec3d m_camerastartposition, m_cameraendposition;
     SbRotation m_camerastartorient, m_cameraendorient;
     float m_seekdistance = 0.0F;
     bool m_seekdistanceabs = false;

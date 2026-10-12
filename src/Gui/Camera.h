@@ -29,7 +29,7 @@
 
 #include <string>
 
-class SbBox3f;
+class SbBox3d;
 class SoOrthographicCamera;
 
 namespace Gui
@@ -75,7 +75,7 @@ public:
     /// How much larger a fitted frame is than the content it holds.
     static constexpr float fitMargin = 1.1F;
 
-    static void fitToBox(SoOrthographicCamera& camera, const SbBox3f& box, float aspect);
+    static void fitToBox(SoOrthographicCamera& camera, const SbBox3d& box, double aspect);
     static Base::Rotation convert(Orientation view);
     static Base::Rotation convert(const SbRotation&);
     static SbRotation convert(const Base::Rotation&);

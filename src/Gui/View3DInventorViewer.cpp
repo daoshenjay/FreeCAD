@@ -1096,7 +1096,7 @@ void View3DInventorViewer::init()
 
     // NOLINTBEGIN
     auto cam = new SoOrthographicCamera;
-    cam->position = SbVec3f(0, 0, 1);
+    cam->position = SbVec3d(0, 0, 1);
     cam->height = 1;
     cam->nearDistance = 0.5;
     cam->farDistance = 1.5;
@@ -1160,7 +1160,7 @@ void View3DInventorViewer::init()
 
     // NOLINTBEGIN
     cam = new SoOrthographicCamera;
-    cam->position = SbVec3f(0, 0, 5);
+    cam->position = SbVec3d(0, 0, 5);
     cam->height = 10;
     cam->nearDistance = 0;
     cam->farDistance = 10;
@@ -3559,7 +3559,7 @@ SbVec3f View3DInventorViewer::getFocalPoint() const
 
     SbVec3f direction;
     camera->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
-    return camera->position.getValue() + camera->focalDistance.getValue() * direction;
+    return SbVec3f(camera->position.getValue() + SbVec3d(direction) * double(camera->focalDistance.getValue()));
 }
 
 float View3DInventorViewer::getMaxDimension() const
@@ -4359,8 +4359,8 @@ void View3DInventorViewer::moveCameraTo(const SbRotation& orientation, const SbV
     if (isAnimationEnabled()) {
         startAnimation(
             orientation,
-            camera->position.getValue(),
-            position - camera->position.getValue(),
+            SbVec3f(camera->position.getValue()),
+            position - SbVec3f(camera->position.getValue()),
             duration,
             true
         );
@@ -4371,7 +4371,7 @@ void View3DInventorViewer::moveCameraTo(const SbRotation& orientation, const SbV
         orientation,
         NavigationStyle::OrientationChangeSource::Programmatic
     );
-    camera->position.setValue(position);
+    camera->position.setValue(SbVec3d(position));
 }
 
 bool View3DInventorViewer::getSceneBoundBox(Base::BoundBox3d& box) const
@@ -4384,8 +4384,10 @@ bool View3DInventorViewer::getSceneBoundBox(Base::BoundBox3d& box) const
     SoSkipBoundingBoxElement::set(action.getState(), SoSkipBoundingGroup::EXCLUDE_BBOX);
 
     if (guiDocument && ViewParams::instance()->getUseTightBoundingBox()) {
-        for (int i = 0; i < pcViewProviderRoot->getNumChildren(); ++i) {
-            auto node = pcViewProviderRoot->getChild(i);
+        // Tight path: resolve each node to its view provider so the double
+        // precision ViewProvider::getBoundingBox() is used where available.
+        // Non-view-provider nodes fall through to the float32 coin action.
+        auto addNodeBBox = [&](SoNode* node) {
             auto vp = guiDocument->getViewProvider(node);
             if (!vp) {
                 action.apply(node);
@@ -4395,14 +4397,34 @@ bool View3DInventorViewer::getSceneBoundBox(Base::BoundBox3d& box) const
                     bbox.getBounds(minx, miny, minz, maxx, maxy, maxz);
                     box.Add(Base::BoundBox3d(minx, miny, minz, maxx, maxy, maxz));
                 }
-                continue;
+                return;
             }
             if (!vp->isVisible()) {
-                continue;
+                return;
             }
             auto sbox = vp->getBoundingBox(nullptr, nullptr, true, this);
             if (sbox.IsValid()) {
                 box.Add(sbox);
+            }
+        };
+        for (int i = 0; i < pcViewProviderRoot->getNumChildren(); ++i) {
+            auto node = pcViewProviderRoot->getChild(i);
+            // objectGroup itself has no view provider; measuring it with the
+            // float32 action would re-add the collapsed sub-ULP box on top of
+            // the per-view-provider boxes computed below.
+            if (node == objectGroup) {
+                continue;
+            }
+            addNodeBBox(node);
+        }
+        // Physical object view providers are grouped below objectGroup (see
+        // addViewProvider()), which is not itself a view provider. Without
+        // descending into it the whole group would be measured by the
+        // float32 coin action, which collapses geometry smaller than the
+        // float32 ULP of the absolute coordinates (64 mm at 1e9 mm).
+        if (objectGroup) {
+            for (int i = 0; i < objectGroup->getNumChildren(); ++i) {
+                addNodeBBox(objectGroup->getChild(i));
             }
         }
     }
@@ -4436,11 +4458,21 @@ bool View3DInventorViewer::getSceneBoundBox(Base::BoundBox3d& box) const
     }
 
     // Coin3D camera seems stuck if zoomed to close because the boundbox is too
-    // small. So, we limit the boundbox size
+    // small. So, we limit the boundbox size. The margin must scale with the
+    // absolute coordinates: 0.1 mm around 1e9 mm vanishes in float32 camera
+    // math (the ULP is 64 mm there), so use 1e-9 * |coordinate| (1 mm at 1e9).
     const double minLength = 1e-7;
     if (std::fabs(box.MinX - box.MaxX) < minLength && std::fabs(box.MinY - box.MaxY) < minLength
         && std::fabs(box.MinZ - box.MaxZ) < minLength) {
-        const double margin = 0.1;
+        const double maxabs = std::max(
+            {std::fabs(box.MinX),
+             std::fabs(box.MaxX),
+             std::fabs(box.MinY),
+             std::fabs(box.MaxY),
+             std::fabs(box.MinZ),
+             std::fabs(box.MaxZ)}
+        );
+        const double margin = std::max(0.1, 1e-9 * maxabs);
         box.MinX -= margin;
         box.MinY -= margin;
         box.MinZ -= margin;
@@ -4451,61 +4483,57 @@ bool View3DInventorViewer::getSceneBoundBox(Base::BoundBox3d& box) const
     return true;
 }
 
-bool View3DInventorViewer::getSceneBoundBox(SbBox3f& box) const
-{
-    Base::BoundBox3d fcbox;
-    getSceneBoundBox(fcbox);
-    if (!fcbox.IsValid()) {
-        return false;
-    }
-    box.setBounds(fcbox.MinX, fcbox.MinY, fcbox.MinZ, fcbox.MaxX, fcbox.MaxY, fcbox.MaxZ);
-    return true;
-}
-
-void View3DInventorViewer::animatedViewAll(const SbBox3f& box, int steps, int ms)
+void View3DInventorViewer::animatedViewAll(const SbBox3d& box, int steps, int ms)
 {
     SoCamera* cam = this->getSoRenderManager()->getCamera();
     if (!cam) {
         return;
     }
 
-    SbVec3f campos = cam->position.getValue();
+    SbVec3d campos = cam->position.getValue();
     SbRotation camrot = cam->orientation.getValue();
     SbViewportRegion vp = this->getSoRenderManager()->getViewportRegion();
 
     float aspectRatio = vp.getViewportAspectRatio();
 
-    SbSphere sphere;
-    sphere.circumscribe(box);
-    if (sphere.getRadius() == 0) {
+    // Bounding sphere in double: an SbSphere would round the center and
+    // radius to float32, which collapses boxes smaller than the float32
+    // ULP of the absolute coordinates (64 mm at 1e9 mm).
+    const SbVec3d center = box.getCenter();
+    double bxmin, bymin, bzmin, bxmax, bymax, bzmax;
+    box.getBounds(bxmin, bymin, bzmin, bxmax, bymax, bzmax);
+    const SbVec3d halfdiag(bxmax - bxmin, bymax - bymin, bzmax - bzmin);
+    const double radius = 0.5 * halfdiag.length();
+    if (radius == 0) {
         return;
     }
 
     SbVec3f direction;
-    SbVec3f pos(0.0F, 0.0F, 0.0F);
     camrot.multVec(SbVec3f(0, 0, -1), direction);
+    const SbVec3d dir(direction[0], direction[1], direction[2]);
 
     bool isOrthographic = false;
     float height = 0;
-    float diff = 0;
+    double diff = 0;
+    SbVec3d pos(0.0, 0.0, 0.0);
 
     if (cam->isOfType(SoOrthographicCamera::getClassTypeId())) {
         isOrthographic = true;
         height = static_cast<SoOrthographicCamera*>(cam)->height.getValue();  // NOLINT
         if (aspectRatio < 1.0F) {
-            diff = sphere.getRadius() * 2 - height * aspectRatio;
+            diff = radius * 2 - double(height) * double(aspectRatio);
         }
         else {
-            diff = sphere.getRadius() * 2 - height;
+            diff = radius * 2 - double(height);
         }
-        pos = (box.getCenter() - direction * sphere.getRadius());
+        pos = center - dir * radius;
     }
     else if (cam->isOfType(SoPerspectiveCamera::getClassTypeId())) {
         // NOLINTBEGIN
-        float movelength = sphere.getRadius()
-            / float(tan(static_cast<SoPerspectiveCamera*>(cam)->heightAngle.getValue() / 2.0));
+        double movelength = radius
+            / tan(static_cast<SoPerspectiveCamera*>(cam)->heightAngle.getValue() / 2.0);
         // NOLINTEND
-        pos = box.getCenter() - direction * movelength;
+        pos = center - dir * movelength;
     }
 
     QEventLoop loop;
@@ -4517,11 +4545,11 @@ void View3DInventorViewer::animatedViewAll(const SbBox3f& box, int steps, int ms
         float par = float(i) / float(steps);
 
         if (isOrthographic) {
-            float camHeight = height + diff * par;
+            float camHeight = float(double(height) + diff * double(par));
             static_cast<SoOrthographicCamera*>(cam)->height.setValue(camHeight);  // NOLINT
         }
 
-        SbVec3f curpos = campos * (1.0F - par) + pos * par;
+        SbVec3d curpos = campos * (1.0 - double(par)) + pos * double(par);
         cam->position.setValue(curpos);
         timer.start(Base::clamp<int>(ms, 0, 5000));  // NOLINT
         loop.exec(QEventLoop::ExcludeUserInputEvents);
@@ -4576,10 +4604,15 @@ void View3DInventorViewer::viewHome()
 
 void View3DInventorViewer::viewAll()
 {
-    SbBox3f box;
-    if (!getSceneBoundBox(box)) {
+    // Keep the scene bounding box in double precision all the way to the
+    // camera: converting it to SbBox3f would collapse boxes smaller than
+    // the float32 ULP of the absolute coordinates (64 mm at 1e9 mm).
+    Base::BoundBox3d fcbox;
+    if (!getSceneBoundBox(fcbox)) {
         return;
     }
+    const SbBox3d box(SbVec3d(fcbox.MinX, fcbox.MinY, fcbox.MinZ),
+                      SbVec3d(fcbox.MaxX, fcbox.MaxY, fcbox.MaxZ));
 
     // Set the height angle to 45 deg
     SoCamera* cam = this->getSoRenderManager()->getCamera();
@@ -4607,24 +4640,23 @@ void View3DInventorViewer::viewAll(float factor)
     }
 
     if (factor != 1.0F) {
-        SbBox3f box;
-        if (!getSceneBoundBox(box)) {
+        Base::BoundBox3d fcbox;
+        if (!getSceneBoundBox(fcbox)) {
             return;
         }
 
-        float dx, dy, dz;
-        box.getSize(dx, dy, dz);
+        const Base::Vector3d center = fcbox.GetCenter();
+        const double dx = fcbox.LengthX();
+        const double dy = fcbox.LengthY();
+        const double dz = fcbox.LengthZ();
 
-        float x, y, z;
-        box.getCenter().getValue(x, y, z);
-
-        box.setBounds(
-            x - (dx / 2.0f) * factor,
-            y - (dy / 2.0f) * factor,
-            z - (dz / 2.0f) * factor,
-            x + (dx / 2.0f) * factor,
-            y + (dy / 2.0f) * factor,
-            z + (dz / 2.0f) * factor
+        const SbBox3d box(
+            SbVec3d(center.x - (dx / 2.0) * double(factor),
+                    center.y - (dy / 2.0) * double(factor),
+                    center.z - (dz / 2.0) * double(factor)),
+            SbVec3d(center.x + (dx / 2.0) * double(factor),
+                    center.y + (dy / 2.0) * double(factor),
+                    center.z + (dz / 2.0) * double(factor))
         );
 
         viewBoundBox(box);
@@ -4700,55 +4732,56 @@ void View3DInventorViewer::viewObjects(const std::vector<App::SubObjectT>& objs,
     }
 
     if (bbox.IsValid()) {
-        SbBox3f box(bbox.MinX, bbox.MinY, bbox.MinZ, bbox.MaxX, bbox.MaxY, bbox.MaxZ);
+        // Double precision: a float32 box would collapse sub-ULP geometry
+        // (the float32 ULP is 64 mm at 1e9 mm coordinates).
+        SbBox3d box(SbVec3d(bbox.MinX, bbox.MinY, bbox.MinZ),
+                    SbVec3d(bbox.MaxX, bbox.MaxY, bbox.MaxZ));
         if (extend) {  // whether to extend the current view volume to include the objects
-            float vx, vy, vz;
-            SbVec3f vcenter = vv.getProjectionPoint()
-                + vv.getProjectionDirection() * (vv.getDepth() * 0.5 + vv.getNearDist());
-            vcenter.getValue(vx, vy, vz);
+            const SbVec3f vcenterf = vv.getProjectionPoint()
+                + vv.getProjectionDirection() * (vv.getDepth() * 0.5f + vv.getNearDist());
+            const double vx = vcenterf[0];
+            const double vy = vcenterf[1];
+            const double vz = vcenterf[2];
 
-            float radius = std::max(vv.getWidth(), vv.getHeight()) * 0.5f;
+            const double radius = double(std::max(vv.getWidth(), vv.getHeight())) * 0.5;
 
             // A rough estimation of the view bounding box. Note that
             // SoCamera::viewBoundingBox() is not accurate as well. It uses a
             // sphere to surround the bounding box for easy calculation.
-            SbBox3f vbox(vx - radius, vy - radius, vz - radius, vx + radius, vy + radius, vz + radius);
+            double minx = vx - radius;
+            double miny = vy - radius;
+            double minz = vz - radius;
+            double maxx = vx + radius;
+            double maxy = vy + radius;
+            double maxz = vz + radius;
+
+            double bminx, bminy, bminz, bmaxx, bmaxy, bmaxz;
+            box.getBounds(bminx, bminy, bminz, bmaxx, bmaxy, bmaxz);
 
             // extend the view box to include the selection
-            vbox.extendBy(box);
+            minx = std::min(minx, bminx);
+            miny = std::min(miny, bminy);
+            minz = std::min(minz, bminz);
+            maxx = std::max(maxx, bmaxx);
+            maxy = std::max(maxy, bmaxy);
+            maxz = std::max(maxz, bmaxz);
 
             // obtain the entire scene bounding box
-            SbBox3f scenebox;
-            getSceneBoundBox(scenebox);
+            Base::BoundBox3d scenebox;
+            if (getSceneBoundBox(scenebox)) {
+                // extend to include the selection, just to be sure
+                scenebox.Add(Base::BoundBox3d(bminx, bminy, bminz, bmaxx, bmaxy, bmaxz));
 
-            // extend to include the selection, just to be sure
-            scenebox.extendBy(box);
+                // clip the extended current view box to the scene box
+                minx = std::max(minx, scenebox.MinX);
+                miny = std::max(miny, scenebox.MinY);
+                minz = std::max(minz, scenebox.MinZ);
+                maxx = std::min(maxx, scenebox.MaxX);
+                maxy = std::min(maxy, scenebox.MaxY);
+                maxz = std::min(maxz, scenebox.MaxZ);
 
-            float minx, miny, minz, maxx, maxy, maxz;
-            vbox.getBounds(minx, miny, minz, maxx, maxy, maxz);
-
-            // clip the extended current view box to the scene box
-            float minx2, miny2, minz2, maxx2, maxy2, maxz2;
-            scenebox.getBounds(minx2, miny2, minz2, maxx2, maxy2, maxz2);
-            if (minx < minx2) {
-                minx = minx2;
+                box = SbBox3d(SbVec3d(minx, miny, minz), SbVec3d(maxx, maxy, maxz));
             }
-            if (miny < miny2) {
-                miny = miny2;
-            }
-            if (minz < minz2) {
-                minz = minz2;
-            }
-            if (maxx > maxx2) {
-                maxx = maxx2;
-            }
-            if (maxy > maxy2) {
-                maxy = maxy2;
-            }
-            if (maxz > maxz2) {
-                maxz = maxz2;
-            }
-            box.setBounds(minx, miny, minz, maxx, maxy, maxz);
         }
         viewBoundBox(box);
     }
@@ -4960,6 +4993,13 @@ void View3DInventorViewer::alignToSelection()
 
 void View3DInventorViewer::viewBoundBox(const SbBox3f& box)
 {
+    float minx, miny, minz, maxx, maxy, maxz;
+    box.getBounds(minx, miny, minz, maxx, maxy, maxz);
+    viewBoundBox(SbBox3d(SbVec3d(minx, miny, minz), SbVec3d(maxx, maxy, maxz)));
+}
+
+void View3DInventorViewer::viewBoundBox(const SbBox3d& box)
+{
     if (isAnimationEnabled()) {
         animatedViewAll(box, 10, 20);
     }
@@ -4979,7 +5019,7 @@ void View3DInventorViewer::viewBoundBox(const SbBox3f& box)
         default:
             break;
     }
-    cam->viewBoundingBox(box, aspectratio, 1.0);
+    cam->viewBoundingBox(box, double(aspectratio), 1.0);
 }
 
 /**

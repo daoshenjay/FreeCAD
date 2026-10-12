@@ -1422,7 +1422,7 @@ void ViewProviderMesh::panCamera(
 
     // Reposition camera according to the vector difference between the
     // projected points.
-    cam->position = cam->position.getValue() - (current_planept - old_planept);
+    cam->position = cam->position.getValue() - SbVec3d(current_planept - old_planept);
 }
 
 void ViewProviderMesh::boxZoom(const SbBox2s& box, const SbViewportRegion& vp, SoCamera* cam)

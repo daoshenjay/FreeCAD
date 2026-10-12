@@ -3122,7 +3122,7 @@ void ViewProviderSketch::centerSelection()
         camera->orientation.getValue().multVec(SbVec3f(0, 0, 1), direction);
         SbVec3f box_cnt = box.getCenter();
         SbVec3f cam_pos = box_cnt + camera->focalDistance.getValue() * direction;
-        camera->position.setValue(cam_pos);
+        camera->position.setValue(SbVec3d(cam_pos));
     }
 }
 
@@ -4659,7 +4659,7 @@ void ViewProviderSketch::setEditViewer(Gui::View3DInventorViewer* viewer, int Mo
     SbVec3f curdir;// current view direction
     camera->orientation.getValue().multVec(SbVec3f(0, 0, -1), curdir);
     SbVec3f plnpos = Base::convertTo<SbVec3f>(plm.getPosition());
-    camera->position.setValue(plnpos - camera->focalDistance.getValue() * curdir);
+    camera->position.setValue(SbVec3d(plnpos - camera->focalDistance.getValue() * curdir));
     viewer->setCameraOrientation(rot);
     if (getSketchObject()->Geometry.getSize() > 0 || getSketchObject()->ExternalGeometry.getSize() > 0) {
         std::vector<App::SubObjectT> objs;

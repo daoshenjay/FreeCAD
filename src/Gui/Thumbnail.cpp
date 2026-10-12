@@ -37,7 +37,8 @@
 #endif
 #include <zipios++/zipfile.h>
 
-#include <Inventor/SbBox3f.h>
+#include <Base/BoundBox.h>
+#include <Inventor/SbBox3d.h>
 #include <Inventor/nodes/SoOrthographicCamera.h>
 
 #include "Thumbnail.h"
@@ -102,12 +103,14 @@ void Thumbnail::SaveDocFile(Base::Writer& writer) const
         else {
             // An empty document frames nothing, so it yields a blank thumbnail rather than a
             // stale one of geometry that has since been deleted.
-            SbBox3f box;
-            this->viewer->getSceneBoundBox(box);
+            Base::BoundBox3d fcbox;
+            this->viewer->getSceneBoundBox(fcbox);
+            const SbBox3d box(fcbox.MinX, fcbox.MinY, fcbox.MinZ,
+                              fcbox.MaxX, fcbox.MaxY, fcbox.MaxZ);
 
             CoinPtr<SoOrthographicCamera> camera(new SoOrthographicCamera);
             camera->orientation.setValue(Camera::defaultOrientation());
-            Camera::fitToBox(*camera, box, 1.0F);
+            Camera::fitToBox(*camera, box, 1.0);
 
             const View3DInventorViewer::RenderImageOptions options {
                 .width = this->size,

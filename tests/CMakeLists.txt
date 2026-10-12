@@ -109,8 +109,12 @@ if(WIN32)
     cmake_path(GET CMAKE_PREFIX_PATH PARENT_PATH _conda_prefix)
     if(EXISTS "${_conda_prefix}/Library/bin")
         list(APPEND _test_env_mod "PATH=path_list_prepend:${_conda_prefix}/Library/bin")
+        # python311.dll and other core runtimes live in the environment root,
+        # one level above Library/bin.
+        list(APPEND _test_env_mod "PATH=path_list_prepend:${_conda_prefix}")
     elseif(EXISTS "${CMAKE_PREFIX_PATH}/bin")
         list(APPEND _test_env_mod "PATH=path_list_prepend:${CMAKE_PREFIX_PATH}/bin")
+        list(APPEND _test_env_mod "PATH=path_list_prepend:${CMAKE_PREFIX_PATH}")
     endif()
     file(GLOB _mod_dirs LIST_DIRECTORIES true "${CMAKE_BINARY_DIR}/Mod/*")
     foreach(_mod_dir ${_mod_dirs})

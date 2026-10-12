@@ -109,14 +109,14 @@ void FixedTimeAnimation::update(const QVariant& value)
 
     SbRotation rotation(rotationAxis, angle - prevAngle);
 
-    camera->position = camera->position.getValue() - prevTranslation;
+    camera->position = camera->position.getValue() - SbVec3d(prevTranslation);
     navigation->reorientCamera(
         camera,
         rotation,
         rotationCenter,
         NavigationStyle::OrientationChangeSource::Programmatic
     );
-    camera->position = camera->position.getValue() + translation;
+    camera->position = camera->position.getValue() + SbVec3d(translation);
 
     prevAngle = angle;
     prevTranslation = translation;
@@ -139,7 +139,7 @@ void FixedTimeAnimation::onStop(bool finished)
             targetOrientation,
             NavigationStyle::OrientationChangeSource::Programmatic
         );
-        camera->position = camera->position.getValue() + targetTranslation - prevTranslation;
+        camera->position = camera->position.getValue() + SbVec3d(targetTranslation) - SbVec3d(prevTranslation);
     }
 }
 

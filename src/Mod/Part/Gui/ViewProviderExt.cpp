@@ -50,6 +50,7 @@
 
 #include <QAction>
 #include <QMenu>
+#include <cstring>
 #include <sstream>
 
 #include <Inventor/SoPickedPoint.h>
@@ -71,6 +72,7 @@
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
 #include <Base/Console.h>
 #include <Base/Parameter.h>
 #include <Base/TimeInfo.h>
@@ -460,6 +462,71 @@ bool ViewProviderPartExt::allowOverride(const App::DocumentObject&) const
     // Many derived view providers still uses static_cast to get object
     // pointer, so check for exact type here.
     return is<ViewProviderPartExt>();
+}
+
+Base::BoundBox3d ViewProviderPartExt::_getBoundingBox(
+    const char* subname,
+    const Base::Matrix4D* mat,
+    bool transform,
+    const Gui::View3DInventorViewer* viewer,
+    int depth
+) const
+{
+    App::DocumentObject* obj = getObject();
+    if (auto* feature = dynamic_cast<Part::Feature*>(obj)) {
+        const bool whole = !subname || !subname[0];
+        // Plain element of this very object ("Edge1"). Names containing a
+        // dot are nested sub objects (handled by recursion in the base
+        // class), mapped element names go through the Coin path as before.
+        const bool element =
+            !whole && strchr(subname, '.') == nullptr && !Data::isMappedElement(subname);
+
+        // A whole object with sub objects is decomposed into its children
+        // by ViewProviderDocumentObject::_getBoundingBox(); each child
+        // then reaches this override itself.
+        const bool recurseIntoChildren =
+            whole && !obj->getSubObjects(App::DocumentObject::GS_SELECT).empty();
+
+        if ((whole || element) && !recurseIntoChildren) {
+            try {
+                Part::TopoShape shape = feature->Shape.getShape();
+                bool resolvable = true;
+                // ViewProvider::_getBoundingBox() measures without the
+                // object's own placement when transform is false, and for
+                // element queries ViewProviderDocumentObject always passes
+                // transform false. The shape location mirrors the placement
+                // property, so stripping it reproduces those semantics.
+                if (element || !transform) {
+                    shape.setTransform(Base::Matrix4D());
+                }
+                if (element) {
+                    const TopoDS_Shape sub = shape.getSubShape(subname, true);
+                    if (sub.IsNull()) {
+                        // Element not resolvable from the shape; let the
+                        // Coin based path try.
+                        resolvable = false;
+                    }
+                    else {
+                        shape = Part::TopoShape(sub);
+                    }
+                }
+                if (resolvable) {
+                    Base::BoundBox3d box = shape.getBoundBox();
+                    if (mat) {
+                        box = box.Transformed(*mat);
+                    }
+                    if (box.IsValid()) {
+                        return box;
+                    }
+                }
+            }
+            catch (const std::exception&) {
+                // Fall through to the generic Coin based path, e.g. for
+                // shapes without valid geometry.
+            }
+        }
+    }
+    return ViewProviderDocumentObject::_getBoundingBox(subname, mat, transform, viewer, depth);
 }
 
 void ViewProviderPartExt::attach(App::DocumentObject* pcFeat)

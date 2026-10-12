@@ -271,7 +271,7 @@ long NavlibInterface::SetHitLookFrom(const navlib::point_t& eye)
             return navlib::make_result_code(navlib::navlib_errc::no_data_available);
         }
 
-        SbVec3f position = pCamera->position.getValue();
+        SbVec3f position(pCamera->position.getValue());
         ray.origin = position + orthoNearDistance * ray.direction;
     }
     return 0;

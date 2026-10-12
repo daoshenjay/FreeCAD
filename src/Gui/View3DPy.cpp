@@ -758,7 +758,7 @@ void View3DInventorPy::setDefaultCameraHeight(float scale)
         rot.multVec(SbVec3f(0, 0, -1), lookDir);
         SbVec3f pos = lookDir * -f;
         cam->focalDistance = f;
-        cam->position = pos;
+        cam->position = SbVec3d(pos);
     }
 }
 
@@ -947,7 +947,7 @@ Py::Object View3DInventorPy::viewPosition(const Py::Tuple& args)
     }
 
     SbRotation rot = cam->orientation.getValue();
-    SbVec3f pos = cam->position.getValue();
+    SbVec3d pos = cam->position.getValue();
     float q0, q1, q2, q3;
     rot.getValue(q0, q1, q2, q3);
     Base::Placement plm(Base::Vector3d(pos[0], pos[1], pos[2]), Base::Rotation(q0, q1, q2, q3));

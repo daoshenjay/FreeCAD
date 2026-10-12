@@ -273,7 +273,7 @@ void SIM::Coin3D::Quarter::SoQTQuarterAdaptor::convertOrtho2Perspective(const So
     SbVec3f offset(0,0,focaldist-in->focalDistance.getValue());
 
     camrot.multVec(offset,offset);
-    out->position.setValue(offset+in->position.getValue());
+    out->position.setValue(SbVec3d(offset) + in->position.getValue());
 
     out->focalDistance.setValue(focaldist);
 
@@ -445,20 +445,20 @@ void SIM::Coin3D::Quarter::SoQTQuarterAdaptor::seekToPoint(const SbVec3f& scenep
     float fd = m_seekdistance;
 
     if(!m_seekdistanceabs) {
-        fd *= (hitpoint - getSoRenderManager()->getCamera()->position.getValue()).length()/100.0F;
+        fd *= float((SbVec3d(hitpoint) - getSoRenderManager()->getCamera()->position.getValue()).length() / 100.0);
     }
 
     getSoRenderManager()->getCamera()->focalDistance = fd;
 
-    SbVec3f dir = hitpoint - m_camerastartposition;
+    SbVec3d dir = SbVec3d(hitpoint) - m_camerastartposition;
     dir.normalize();
 
     // find a rotation that rotates current camera direction into new
     // camera direction.
     SbVec3f olddir;
     getSoRenderManager()->getCamera()->orientation.getValue().multVec(SbVec3f(0, 0, -1), olddir);
-    SbRotation diffrot(olddir, dir);
-    m_cameraendposition = hitpoint - fd * dir;
+    SbRotation diffrot(olddir, SbVec3f(dir));
+    m_cameraendposition = SbVec3d(hitpoint) - SbVec3d(dir) * double(fd);
     m_cameraendorient = getSoRenderManager()->getCamera()->orientation.getValue() * diffrot;
 
     if(m_seeksensor->isScheduled()) {
@@ -672,7 +672,7 @@ void SIM::Coin3D::Quarter::SoQTQuarterAdaptor::moveCameraScreen(const SbVec2f& s
 
     // Reposition camera according to the vector difference between the
     // projected points.
-    cam->position = cam->position.getValue() - (current_planept - old_planept);
+    cam->position = cam->position.getValue() - SbVec3d(current_planept - old_planept);
 }
 
 bool SIM::Coin3D::Quarter::SoQTQuarterAdaptor::processSoEvent(const SoEvent* event)

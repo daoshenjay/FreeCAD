@@ -564,8 +564,8 @@ void SoNaviCube::buildCamerasAndStyle() const
         orthoCamera->aspectRatio = 1.0F;
         perspCamera->aspectRatio = 1.0F;
 
-        orthoCamera->position = SbVec3f(0.0F, 0.0F, 0.0F);
-        perspCamera->position = SbVec3f(0.0F, 0.0F, 0.0F);
+        orthoCamera->position = SbVec3d(0.0, 0.0, 0.0);
+        perspCamera->position = SbVec3d(0.0, 0.0, 0.0);
         orthoCamera->orientation = SbRotation();
         perspCamera->orientation = SbRotation();
 

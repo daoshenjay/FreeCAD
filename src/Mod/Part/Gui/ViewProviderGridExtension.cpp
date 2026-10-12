@@ -467,7 +467,7 @@ int GridExtensionP::getViewOrientationFactor() const
         return 1;
     }
 
-    auto cameraPosition = getPointInSketchCoordinates(camera->position.getValue());
+    auto cameraPosition = getPointInSketchCoordinates(SbVec3f(camera->position.getValue()));
     return cameraPosition.z < 0 ? -1 : 1;
 }
 

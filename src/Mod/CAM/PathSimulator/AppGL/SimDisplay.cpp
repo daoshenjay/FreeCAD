@@ -516,7 +516,7 @@ void SimDisplay::UpdateCamera(const SoCamera& camera)
 void SimDisplay::UpdateCameraView(const SoCamera& camera)
 {
 
-    const SbVec3f position = camera.position.getValue();
+    const SbVec3f position(camera.position.getValue());
     const SbRotation orientation = camera.orientation.getValue();
 
     if (position == mCameraPosition && orientation == mCameraOrientation) {

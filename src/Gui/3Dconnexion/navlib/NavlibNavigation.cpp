@@ -331,7 +331,7 @@ long NavlibInterface::GetCameraMatrix(navlib::matrix_t& matrix) const
         for (int i = 0; i < 4; i++)
             std::copy(cameraMatrix[i], cameraMatrix[i] + 4, &matrix.m00 + 4 * i);
 
-        const SbVec3f position = pCamera->position.getValue();
+        const SbVec3f position(pCamera->position.getValue());
         std::copy(position.getValue(), position.getValue() + 3, &matrix.m30);
 
         return 0;

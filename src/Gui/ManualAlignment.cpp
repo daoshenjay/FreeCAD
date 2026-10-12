@@ -489,7 +489,7 @@ public:
     SoNodeSensor* sensorCam1 {nullptr};
     SoNodeSensor* sensorCam2 {nullptr};
     SbRotation rot_cam1, rot_cam2;
-    SbVec3f pos_cam1, pos_cam2;
+    SbVec3d pos_cam1, pos_cam2;
 
     Private()
     {
@@ -517,23 +517,23 @@ public:
         // Find global coordinates of focal point.
         SbVec3f direction;
         cam->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
-        SbVec3f focalpoint = cam->position.getValue() + cam->focalDistance.getValue() * direction;
+        SbVec3d focalpoint = cam->position.getValue() + SbVec3d(direction) * double(cam->focalDistance.getValue());
 
         // Set new orientation value by accumulating the new rotation.
         cam->orientation = rot * cam->orientation.getValue();
 
         // Reposition camera so we are still pointing at the same old focal point.
         cam->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
-        cam->position = focalpoint - cam->focalDistance.getValue() * direction;
+        cam->position = focalpoint - SbVec3d(direction) * double(cam->focalDistance.getValue());
     }
 
     static void copyCameraSettings(
         SoCamera* cam1,
         SbRotation& rot_cam1,
-        SbVec3f& pos_cam1,
+        SbVec3d& pos_cam1,
         SoCamera* cam2,
         SbRotation& rot_cam2,
-        SbVec3f& pos_cam2
+        SbVec3d& pos_cam2
     )
     {
         Q_UNUSED(pos_cam2);
@@ -552,14 +552,15 @@ public:
         rot_cam2 = cam2->orientation.getValue();
 
         // reverse engineer the translation part in wc
-        SbVec3f pos = cam1->position.getValue();
-        SbVec3f difpos = pos - pos_cam1;
+        SbVec3d pos = cam1->position.getValue();
+        SbVec3d difposd = pos - pos_cam1;
         pos_cam1 = pos;
         // the translation in pixel coords
+        SbVec3f difpos(difposd);
         cam1->orientation.getValue().inverse().multVec(difpos, difpos);
         // the translation again in wc for the second camera
         cam2->orientation.getValue().multVec(difpos, difpos);
-        cam2->position.setValue(cam2->position.getValue() + difpos);
+        cam2->position.setValue(cam2->position.getValue() + SbVec3d(difpos));
 
         if (cam1->getTypeId() == cam2->getTypeId()) {
             if (cam1->getTypeId() == SoOrthographicCamera::getClassTypeId()) {

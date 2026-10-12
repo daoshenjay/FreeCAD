@@ -151,6 +151,21 @@ SetGlobalCompilerAndLinkerSettings()
 add_subdirectory(src)
 add_subdirectory(data)
 
+# On Windows, Qt from a conda/pixi environment resolves its plugin paths from
+# QtCore.dll's location when no qt.conf is present, which lands outside the
+# environment and breaks platform plugin discovery for executables that do not
+# live in the conda environment itself (e.g. in the build tree). Generate a
+# qt.conf next to the built binaries so QApplication can initialize in GUI
+# applications and Qt-based tests.
+if(WIN32 AND CMAKE_PREFIX_PATH)
+    cmake_path(GET CMAKE_PREFIX_PATH PARENT_PATH _freecad_qt_prefix)
+    if(EXISTS "${_freecad_qt_prefix}/Library/lib/qt6/plugins")
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        file(WRITE "${CMAKE_BINARY_DIR}/bin/qt.conf"
+             "[Paths]\nPrefix = ${_freecad_qt_prefix}/Library\nBinaries = bin\nPlugins = lib/qt6/plugins\n")
+    endif()
+endif()
+
 BuildAndInstallDesignerPlugin()
 
 CreatePackagingTargets()
