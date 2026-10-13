@@ -3552,6 +3552,11 @@ void View3DInventorViewer::setSeekMode(bool on)
 
 SbVec3f View3DInventorViewer::getFocalPoint() const
 {
+    return SbVec3f(getFocalPointD());
+}
+
+SbVec3d View3DInventorViewer::getFocalPointD() const
+{
     const SoCamera* camera = getCamera();
     if (!camera) {
         return {0., 0., 0.};
@@ -3559,7 +3564,8 @@ SbVec3f View3DInventorViewer::getFocalPoint() const
 
     SbVec3f direction;
     camera->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
-    return SbVec3f(camera->position.getValue() + SbVec3d(direction) * double(camera->focalDistance.getValue()));
+    return camera->position.getValue()
+        + SbVec3d(direction) * double(camera->focalDistance.getValue());
 }
 
 float View3DInventorViewer::getMaxDimension() const
@@ -4480,6 +4486,66 @@ bool View3DInventorViewer::getSceneBoundBox(Base::BoundBox3d& box) const
         box.MaxY += margin;
         box.MaxZ += margin;
     }
+    return true;
+}
+
+bool View3DInventorViewer::getObjectBoundBox(Base::BoundBox3d& box) const
+{
+    if (!objectGroup) {
+        return false;
+    }
+
+    // Double-precision bounding box of the physical object group only. The
+    // float32 SoGetBoundingBoxAction collapses geometry smaller than the
+    // float32 ULP of the absolute coordinates (64 mm at 1e9 mm), which used
+    // to hand the navigation constraints a zero-radius bounding sphere.
+    Base::BoundBox3d result;
+
+    SoGetBoundingBoxAction action(this->getSoRenderManager()->getViewportRegion());
+    SoSkipBoundingBoxElement::set(action.getState(), SoSkipBoundingGroup::EXCLUDE_BBOX);
+
+    if (guiDocument && ViewParams::instance()->getUseTightBoundingBox()) {
+        // Tight path (same as getSceneBoundBox()): resolve each node to its
+        // view provider so the double-precision ViewProvider::getBoundingBox()
+        // is used where available. Non-view-provider nodes fall through to
+        // the float32 coin action.
+        for (int i = 0; i < objectGroup->getNumChildren(); ++i) {
+            SoNode* node = objectGroup->getChild(i);
+            auto vp = guiDocument->getViewProvider(node);
+            if (!vp) {
+                action.apply(node);
+                auto bbox = action.getBoundingBox();
+                if (isValidBBox(bbox)) {
+                    float minx, miny, minz, maxx, maxy, maxz;
+                    bbox.getBounds(minx, miny, minz, maxx, maxy, maxz);
+                    result.Add(Base::BoundBox3d(minx, miny, minz, maxx, maxy, maxz));
+                }
+                continue;
+            }
+            if (!vp->isVisible()) {
+                continue;
+            }
+            auto sbox = vp->getBoundingBox(nullptr, nullptr, true, this);
+            if (sbox.IsValid()) {
+                result.Add(sbox);
+            }
+        }
+    }
+    else {
+        action.apply(objectGroup);
+        auto bbox = action.getBoundingBox();
+        if (isValidBBox(bbox)) {
+            float minx, miny, minz, maxx, maxy, maxz;
+            bbox.getBounds(minx, miny, minz, maxx, maxy, maxz);
+            result = Base::BoundBox3d(minx, miny, minz, maxx, maxy, maxz);
+        }
+    }
+
+    if (!result.IsValid()) {
+        return false;
+    }
+
+    box = result;
     return true;
 }
 

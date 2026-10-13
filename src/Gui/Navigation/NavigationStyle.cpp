@@ -653,27 +653,32 @@ std::shared_ptr<NavigationAnimation> NavigationStyle::setCameraOrientation(
 
     animator->stop();
 
-    const SbVec3f focalPoint = viewer->getFocalPoint();
-    SbVec3f translation(0, 0, 0);
+    // Double-precision focal point; the float variant is quantized to the
+    // 64 mm grid at 1e9 mm absolute coordinates and would visibly shift
+    // the camera when used as the reorientation anchor.
+    const SbVec3d focalPoint = viewer->getFocalPointD();
+    SbVec3d translation(0, 0, 0);
 
     if (moveToCenter) {
         SoGetBoundingBoxAction action(viewer->getSoRenderManager()->getViewportRegion());
         action.apply(viewer->getSceneGraph());
         SbBox3f box = action.getBoundingBox();
         if (!box.isEmpty()) {
-            translation = box.getCenter() - focalPoint;
+            translation = SbVec3d(box.getCenter()) - focalPoint;
         }
     }
 
     // Start an animation and return it
     if (isAnimationEnabled()) {
-        return viewer->startAnimation(orientation, focalPoint, translation);
+        return viewer->startAnimation(orientation, SbVec3f(focalPoint), SbVec3f(translation));
     }
 
     // or set the pose directly
 
-    // Distance from rotation center to camera position in camera coordinate system
-    const SbVec3f rotationCenterDistanceCam = camera->focalDistance.getValue() * SbVec3f(0, 0, 1);
+    // Distance from rotation center to camera position in camera coordinate
+    // system. The offset itself is tiny (focalDistance scale), float32 is
+    // plenty; only the absolute anchor above must stay double.
+    const SbVec3f rotationCenterDistanceCam(0, 0, camera->focalDistance.getValue());
 
     // Set to the given orientation
     setCameraOrientationValue(camera, orientation, OrientationChangeSource::Programmatic);
@@ -684,7 +689,7 @@ std::shared_ptr<NavigationAnimation> NavigationStyle::setCameraOrientation(
 
     // Reposition camera so the rotation center stays in the same place
     // Optionally add translation to move to center
-    camera->position = SbVec3d(focalPoint + newRotationCenterDistance + translation);
+    camera->position = focalPoint + SbVec3d(newRotationCenterDistance) + translation;
 
     return {};
 }
@@ -834,7 +839,17 @@ void NavigationStyle::reorientCamera(
     const OrientationChangeSource source
 )
 {
-    reorientCamera(camera, rotation, viewer->getFocalPoint(), source);
+    reorientCamera(camera, rotation, viewer->getFocalPointD(), source);
+}
+
+void NavigationStyle::reorientCamera(
+    SoCamera* camera,
+    const SbRotation& rotation,
+    const SbVec3f& rotationCenter,
+    const OrientationChangeSource source
+)
+{
+    reorientCamera(camera, rotation, SbVec3d(rotationCenter), source);
 }
 
 /** Rotate the camera by the given amount, then reposition it so the rotation center stays in the
@@ -843,7 +858,7 @@ void NavigationStyle::reorientCamera(
 void NavigationStyle::reorientCamera(
     SoCamera* camera,
     const SbRotation& rotation,
-    const SbVec3f& rotationCenter,
+    const SbVec3d& rotationCenter,
     const OrientationChangeSource source
 )
 {
@@ -860,7 +875,7 @@ void NavigationStyle::reorientCamera(
     // Distance from rotation center to camera position in camera coordinate system
     SbVec3f rotationCenterDistanceCam;
     currentOrientation.inverse().multVec(
-        SbVec3f(camera->position.getValue() - SbVec3d(rotationCenter)),
+        SbVec3f(camera->position.getValue() - rotationCenter),
         rotationCenterDistanceCam
     );
 
@@ -872,7 +887,7 @@ void NavigationStyle::reorientCamera(
     camera->orientation.getValue().multVec(rotationCenterDistanceCam, newRotationCenterDistance);
 
     // Reposition camera so the rotation center stays in the same place
-    camera->position = SbVec3d(rotationCenter) + SbVec3d(newRotationCenterDistance);
+    camera->position = rotationCenter + SbVec3d(newRotationCenterDistance);
 
     if (camera->getTypeId().isDerivedFrom(SoOrthographicCamera::getClassTypeId())) {
         // Adjust the camera position to keep the focal point in the same place while making sure
@@ -890,8 +905,33 @@ void NavigationStyle::reorientCamera(
 #else
         constexpr float orthographicFocalDistance = 1;
 #endif
-        camera->position = SbVec3d(viewer->getFocalPoint()) - SbVec3d(direction) * double(orthographicFocalDistance);
+        // Double-precision focal point: the float variant is quantized to
+        // the 64 mm grid at 1e9 mm absolute coordinates, and snapping the
+        // camera to it laterally shifts the view by up to ~32 mm on the
+        // first rotation frame (visible as a jump).
+        const SbVec3d focalPoint = viewer->getFocalPointD();
+        const SbVec3d oldPosition = camera->position.getValue();
+        camera->position = focalPoint - SbVec3d(direction) * double(orthographicFocalDistance);
         camera->focalDistance = orthographicFocalDistance;
+
+        // The camera jumps along its view axis, so every scene point changes
+        // its depth by the same amount (oldPosition - newPosition) . direction
+        // == (oldPosition - focalPoint) . direction + orthographicFocalDistance.
+        // The near/far planes are camera-relative distances and must be shifted
+        // by that amount, or the scene ends up outside the clipping range and
+        // the geometry is sliced by the near plane. Coin's automatic near/far
+        // update cannot rescue this at large absolute coordinates: it measures
+        // the scene with a float32 bounding box, which collapses there (see
+        // SoRenderManagerP::setClippingPlanes), so it deliberately keeps the
+        // camera's current planes.
+        const double shift =
+            (oldPosition - focalPoint).dot(SbVec3d(direction)) + double(orthographicFocalDistance);
+        if (shift != 0.0) {
+            camera->nearDistance =
+                float(double(camera->nearDistance.getValue()) + shift);
+            camera->farDistance =
+                float(double(camera->farDistance.getValue()) + shift);
+        }
     }
 
 #if (COIN_MAJOR_VERSION * 100 + COIN_MINOR_VERSION * 10 + COIN_MICRO_VERSION < 403)
@@ -1069,6 +1109,40 @@ void NavigationStyle::zoom(SoCamera* cam, float diffvalue)
         else {
             cam->position = newpos;
             cam->focalDistance = newfocaldist;
+
+            // The camera moves along its view axis by
+            // (newfocaldist - oldfocaldist); the camera-relative near/far
+            // distances change by the same amount. Coin's automatic near/far
+            // update normally re-measures the scene each frame, but it is
+            // disabled where its float32 bounding box collapses (large
+            // absolute coordinates), so without this the scene leaves the
+            // clipping range while zooming and gets sliced by the near plane.
+            // The far plane is shifted with the camera and never clamped, so
+            // zooming back out recovers it exactly; the perspective near
+            // plane is recomputed symmetrically around the focal point from
+            // the far plane (fits keep it symmetric), so the positive-near
+            // clamp below cannot leak into the next zoom step.
+            const double shift = double(newfocaldist) - double(oldfocaldist);
+            if (shift != 0.0) {
+                const float newfar =
+                    float(double(cam->farDistance.getValue()) + shift);
+                float newnear;
+                if (cam->isOfType(SoPerspectiveCamera::getClassTypeId())) {
+                    newnear = float(2.0 * double(newfocaldist) - double(newfar));
+                    if (newnear < newfar * 1.0e-4f) {
+                        // A perspective camera must keep a strictly positive near
+                        // plane inside the frustum; mirror Coin's auto-clipping
+                        // floor when the recomputed value would be zero or less.
+                        newnear = std::max(newfar * 1.0e-4f, 1.0e-5f);
+                    }
+                }
+                else {
+                    newnear =
+                        float(double(cam->nearDistance.getValue()) + shift);
+                }
+                cam->nearDistance = newnear;
+                cam->farDistance = newfar;
+            }
         }
     }
 
@@ -1377,15 +1451,31 @@ void NavigationStyle::beginOrbitDrag(const OrbitDragOptions& options)
     stopAnimating();
 
     OrbitDragState state;
-    state.center = viewer->getFocalPoint();
+    state.center = viewer->getFocalPointD();
     state.sensitivity = std::max(0.0F, options.sensitivity);
 
-    SbSphere sceneSphere;
+    // Prefer the double-precision object bounds: the float32 coin action
+    // collapses at large absolute coordinates and a float32 center would
+    // quantize the orbit anchor (visible first-frame jump at 1e9 mm).
+    const double minDistanceFactor = std::max(0.0, double(options.minDistanceFactor));
+    const double clippingRadiusFactor = std::max(0.0, double(options.clippingRadiusFactor));
+    Base::BoundBox3d objectBox;
     if (options.centerMode == OrbitDragOptions::CenterMode::SceneBoundingSphere
-        && getObjectBoundingSphere(sceneSphere)) {
-        state.center = sceneSphere.getCenter();
-        state.minDistance = std::max(0.0F, options.minDistanceFactor) * sceneSphere.getRadius();
-        state.clippingRadius = std::max(0.0F, options.clippingRadiusFactor) * sceneSphere.getRadius();
+        && viewer->getObjectBoundBox(objectBox) && objectBox.IsValid()) {
+        const double radius =
+            0.5 * (objectBox.GetMaximum() - objectBox.GetMinimum()).Length();
+        const Base::Vector3d center = objectBox.GetCenter();
+        state.center = SbVec3d(center.x, center.y, center.z);
+        state.minDistance = minDistanceFactor * radius;
+        state.clippingRadius = clippingRadiusFactor * radius;
+    }
+    else if (options.centerMode == OrbitDragOptions::CenterMode::SceneBoundingSphere) {
+        SbSphere sceneSphere;
+        if (getObjectBoundingSphere(sceneSphere)) {
+            state.center = SbVec3d(sceneSphere.getCenter());
+            state.minDistance = minDistanceFactor * double(sceneSphere.getRadius());
+            state.clippingRadius = clippingRadiusFactor * double(sceneSphere.getRadius());
+        }
     }
 
     orbitDrag = state;
@@ -1438,7 +1528,7 @@ void NavigationStyle::spinSimplifiedInternal(SbVec2f curpos, SbVec2f prevpos)
     spinSimplifiedInternal(curpos, prevpos, nullptr);
 }
 
-void NavigationStyle::spinSimplifiedInternal(SbVec2f curpos, SbVec2f prevpos, const SbVec3f* center)
+void NavigationStyle::spinSimplifiedInternal(SbVec2f curpos, SbVec2f prevpos, const SbVec3d* center)
 {
     // 0000333: Turntable camera rotation
     SbMatrix mat;
@@ -1475,6 +1565,22 @@ bool NavigationStyle::getObjectBoundingSphere(SbSphere& sphere) const
         return false;
     }
 
+    // Measure the physical object group in double precision: the float32
+    // coin action collapses geometry smaller than the float32 ULP of the
+    // absolute coordinates (64 mm at 1e9 mm), which used to hand the
+    // orbit constraints a zero-radius sphere.
+    Base::BoundBox3d box;
+    if (viewer->getObjectBoundBox(box) && box.IsValid()) {
+        const Base::Vector3d center = box.GetCenter();
+        const double radius =
+            0.5 * (box.GetMaximum() - box.GetMinimum()).Length();
+        sphere.setValue(SbVec3f(static_cast<float>(center.x),
+                                static_cast<float>(center.y),
+                                static_cast<float>(center.z)),
+                        static_cast<float>(radius));
+        return true;
+    }
+
     // Get the bounding sphere of the physical object group.
     SoGetBoundingBoxAction action(viewer->getSoRenderManager()->getViewportRegion());
     action.apply(viewer->objectGroup);
@@ -1509,9 +1615,9 @@ void NavigationStyle::applyOrbitDragCameraConstraints(const OrbitDragState& stat
     camera->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
 
     SbVec3d cameraPosition = camera->position.getValue();
-    double centerDepth = (SbVec3d(state.center) - cameraPosition).dot(SbVec3d(direction));
-    if (state.minDistance > 0.0F && centerDepth < state.minDistance) {
-        cameraPosition -= SbVec3d(direction) * double(state.minDistance - centerDepth);
+    double centerDepth = (state.center - cameraPosition).dot(SbVec3d(direction));
+    if (state.minDistance > 0.0 && centerDepth < state.minDistance) {
+        cameraPosition -= SbVec3d(direction) * (state.minDistance - centerDepth);
         camera->position = cameraPosition;
         centerDepth = state.minDistance;
     }
@@ -1520,19 +1626,19 @@ void NavigationStyle::applyOrbitDragCameraConstraints(const OrbitDragState& stat
         camera->focalDistance = float(centerDepth);
     }
 
-    if (state.clippingRadius <= 0.0F || centerDepth <= 0.0F) {
+    if (state.clippingRadius <= 0.0 || centerDepth <= 0.0) {
         return;
     }
 
-    const float minNearDistance = camera->isOfType(SoPerspectiveCamera::getClassTypeId())
-        ? std::max(state.clippingRadius * 1.0e-4F, 1.0e-5F)
-        : 0.0F;
-    const float minClipSpan = std::max(state.clippingRadius * 1.0e-3F, 1.0e-4F);
-    const float centerDepthF = float(centerDepth);
-    const float nearDistance = std::max(minNearDistance, centerDepthF - state.clippingRadius);
-    const float farDistance = std::max(centerDepthF + state.clippingRadius, nearDistance + minClipSpan);
-    camera->nearDistance = nearDistance;
-    camera->farDistance = farDistance;
+    const double minNearDistance = camera->isOfType(SoPerspectiveCamera::getClassTypeId())
+        ? std::max(state.clippingRadius * 1.0e-4, 1.0e-5)
+        : 0.0;
+    const double minClipSpan = std::max(state.clippingRadius * 1.0e-3, 1.0e-4);
+    const double nearDistance = std::max(minNearDistance, centerDepth - state.clippingRadius);
+    const double farDistance =
+        std::max(centerDepth + state.clippingRadius, nearDistance + minClipSpan);
+    camera->nearDistance = float(nearDistance);
+    camera->farDistance = float(farDistance);
 }
 
 SbBool NavigationStyle::doSpin()

@@ -1705,6 +1705,19 @@ class gridTracker(Tracker):
 
         self.pts = []
         s = coin.SoType.fromName("SoSkipBoundingGroup").createInstance()
+        # The grid is UI chrome attached at the working plane (usually
+        # the world origin).  FreeCAD's SoSkipBoundingGroup only skips
+        # its children from the scene bounding box when the mode is
+        # EXCLUDE_BBOX (INCLUDE_BBOX is the default), so without this
+        # the origin grid stretches the scene box to span e.g.
+        # 0..1e9 mm and poisons the automatic near/far clipping
+        # planes of cameras framed on geometry far from the origin.
+        # pivy does not expose the SoSkipBoundingGroup class, so the
+        # enum is set by value: SoSkipBoundingGroup::EXCLUDE_BBOX == 1.
+        try:
+            s.mode = 1  # EXCLUDE_BBOX
+        except Exception:
+            pass
         s.addChild(pick)
         s.addChild(self.trans)
         s.addChild(self.mat1)

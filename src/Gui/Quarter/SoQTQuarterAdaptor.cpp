@@ -265,6 +265,11 @@ void SIM::Coin3D::Quarter::SoQTQuarterAdaptor::convertOrtho2Perspective(const So
     out->orientation.setValue(in->orientation.getValue());
     out->position.setValue(in->position.getValue());
     out->viewportMapping.setValue(in->viewportMapping.getValue());
+    // The depth planes are projection-type agnostic; keep them so the
+    // scene is not clipped away while waiting for the next automatic
+    // near/far update (Coin defaults 1/10 would clip large scenes).
+    out->nearDistance.setValue(in->nearDistance.getValue());
+    out->farDistance.setValue(in->farDistance.getValue());
 
     SbRotation camrot = in->orientation.getValue();
 
@@ -289,6 +294,9 @@ void SIM::Coin3D::Quarter::SoQTQuarterAdaptor::convertPerspective2Ortho(const So
     out->orientation.setValue(in->orientation.getValue());
     out->position.setValue(in->position.getValue());
     out->viewportMapping.setValue(in->viewportMapping.getValue());
+    // Projection-type agnostic depth planes; keep them (see above).
+    out->nearDistance.setValue(in->nearDistance.getValue());
+    out->farDistance.setValue(in->farDistance.getValue());
 
     float focaldist = in->focalDistance.getValue();
 

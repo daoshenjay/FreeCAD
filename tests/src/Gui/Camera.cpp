@@ -689,3 +689,153 @@ TEST_F(CameraPanAtLargeCoordinates, theF32UnprojectionPathQuantizesToSixtyFourMi
     EXPECT_TRUE(std::abs(delta[0]) < 1e-3 || std::abs(delta[0]) > 32.0);
     EXPECT_NE(static_cast<double>(delta[0]), expected);
 }
+
+
+// Reproduces the view-frustum culling that SoCullElement::docull() performs
+// on the planes from SbViewVolume::getViewVolumePlanes(SbDPPlane[6]): the
+// double planes must keep their verdicts pinned to the true geometry while
+// the camera pans at large coordinates, where the float32 planes quantize to
+// a coarse grid (the distance terms carry absolute coordinates of ~1e9 mm)
+// and made nearby objects flicker in and out of the frustum.
+class CameraCullPlanesAtLargeCoordinates: public ::testing::Test
+{
+protected:
+    static void SetUpTestSuite()
+    {
+        tests::initApplication();
+    }
+};
+
+namespace
+{
+
+// An isometric orthographic frustum (20 mm across, +-8 mm deep) together
+// with a 4 mm world-axis-aligned box whose leftmost point sits 1 mm inside
+// the frustum's left plane. The frustum and the box translate together by
+// (t, 0, 0), so every true in/out verdict is invariant under the pan while
+// the float32 planes and float32 corners walk across the float32 grid at
+// 1e9 mm (64 mm).
+struct PannedFrustum
+{
+    std::array<SbVec3d, 8> corners;
+    SbViewVolume volume;
+};
+
+PannedFrustum pannedFrustum(double t)
+{
+    const SbVec3d boxCenter(1000000000.0 + t, 1000000000.0, 0.0);
+    const double half = 2.0;
+
+    // Camera-space position of the box center: the isometric right axis is
+    // (0.707, -0.707, 0), so the world-axis-aligned box spans +-2*sqrt(2)
+    // along it, and this puts its leftmost point 1 mm inside the left plane
+    // of the 20 mm wide frustum.
+    const double cameraX = -(10.0 - 1.0 - 2.0 * std::sqrt(2.0));
+
+    const SbRotation isometric = Gui::Camera::rotation(Gui::Camera::Isometric);
+    SbVec3f right;
+    isometric.multVec(SbVec3f(1.0F, 0.0F, 0.0F), right);
+
+    PannedFrustum frustum;
+    for (int i = 0; i < 8; ++i) {
+        frustum.corners[i] = boxCenter
+            + SbVec3d((i & 1) ? half : -half,
+                      (i & 2) ? half : -half,
+                      (i & 4) ? half : -half);
+    }
+
+    frustum.volume.ortho(-10.0F, 10.0F, -10.0F, 10.0F, -8.0F, 8.0F);
+    frustum.volume.rotateCamera(isometric);
+    frustum.volume.translateCamera(boxCenter - SbVec3d(right) * cameraX);
+    return frustum;
+}
+
+}  // namespace
+
+TEST_F(CameraCullPlanesAtLargeCoordinates, theDoublePlanesKeepTheBoxInsideWhilePanning)
+{
+    for (double t = 0.0; t <= 1024.0; t += 1.0) {
+        const PannedFrustum frustum = pannedFrustum(t);
+
+        SbDPPlane planes[6];
+        frustum.volume.getViewVolumePlanes(planes);
+
+        for (int p = 0; p < 6; ++p) {
+            const SbVec3d& normal = planes[p].getNormal();
+            const double offset = planes[p].getDistanceFromOrigin();
+            for (const SbVec3d& corner : frustum.corners) {
+                ASSERT_TRUE(planes[p].isInHalfSpace(corner))
+                    << "pan offset " << t << ", plane " << p;
+                ASSERT_GT(std::abs(corner.dot(normal) - offset), 0.5)
+                    << "pan offset " << t << ", plane " << p;
+            }
+        }
+    }
+}
+
+TEST_F(CameraCullPlanesAtLargeCoordinates, theFloat32PlanesCannotPinTheVerdict)
+{
+    int flippedVerdicts = 0;
+    int doubleVerdictMisses = 0;
+    int badLateralSpans = 0;
+
+    for (double t = 0.0; t <= 1024.0; t += 1.0) {
+        const PannedFrustum frustum = pannedFrustum(t);
+
+        SbPlane float32Planes[6];
+        frustum.volume.getViewVolumePlanes(float32Planes);
+        SbDPPlane doublePlanes[6];
+        frustum.volume.getViewVolumePlanes(doublePlanes);
+
+        // The 2 mm box offsets fall below the float32 ULP (64 mm at
+        // 1e9 mm): the lateral extents of the box are unrepresentable and
+        // snap to the grid -- the span is either lost entirely or jumps to
+        // a full ULP when a corner crosses a grid boundary. (The z extent
+        // sits near the origin and stays exact.)
+        float minX = static_cast<float>(frustum.corners[0][0]);
+        float maxX = minX;
+        float minY = static_cast<float>(frustum.corners[0][1]);
+        float maxY = minY;
+        for (int i = 0; i < 8; ++i) {
+            const SbVec3d& corner = frustum.corners[i];
+            const SbVec3f quantized(static_cast<float>(corner[0]),
+                                    static_cast<float>(corner[1]),
+                                    static_cast<float>(corner[2]));
+            minX = std::min(minX, quantized[0]);
+            maxX = std::max(maxX, quantized[0]);
+            minY = std::min(minY, quantized[1]);
+            maxY = std::max(maxY, quantized[1]);
+
+            for (int p = 0; p < 6; ++p) {
+                const SbBool insideDouble =
+                    doublePlanes[p].isInHalfSpace(corner);
+                const SbBool insideFloat =
+                    float32Planes[p].isInHalfSpace(quantized);
+                if (!insideDouble) {
+                    ++doubleVerdictMisses;
+                }
+                if (insideDouble && !insideFloat) {
+                    ++flippedVerdicts;
+                }
+            }
+        }
+
+        const float spanX = maxX - minX;
+        const float spanY = maxY - minY;
+        if (!((spanX == 0.0F || spanX == 64.0F) && spanY == 0.0F)) {
+            ++badLateralSpans;
+        }
+    }
+
+    // A 4 mm lateral extent never survives: the float32 corners collapse
+    // in x and y, leaving the float32 planes nothing to test against.
+    EXPECT_EQ(badLateralSpans, 0);
+
+    // The double verdicts are invariant under the pan and keep the box.
+    EXPECT_EQ(doubleVerdictMisses, 0);
+
+    // The float32 planes quantize to a coarse grid while the frustum pans;
+    // their verdicts flip although the geometry does not change. This is the
+    // flicker this suite guards against.
+    EXPECT_GT(flippedVerdicts, 0);
+}

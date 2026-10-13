@@ -593,6 +593,10 @@ public:
     void getDimensions(float& fHeight, float& fWidth) const;
     float getMaxDimension() const;
     SbVec3f getFocalPoint() const;
+    /** Double-precision focal point. The float variant quantizes to the
+     * 64 mm grid at 1e9 mm absolute coordinates, which visibly shifts the
+     * camera when used as a rotation/reposition anchor. */
+    SbVec3d getFocalPointD() const;
 
     NavigationStyle* navigationStyle() const;
 
@@ -602,6 +606,9 @@ public:
     virtual PyObject* getPyObject();
 
     bool getSceneBoundBox(Base::BoundBox3d& box) const;
+
+    //! Double-precision bounding box of the physical object group (objectGroup)
+    bool getObjectBoundBox(Base::BoundBox3d& box) const;
 
 Q_SIGNALS:
     void cameraChanged();

@@ -244,6 +244,12 @@ public:
     void reorientCamera(
         SoCamera* camera,
         const SbRotation& rotation,
+        const SbVec3d& rotationCenter,
+        OrientationChangeSource source = OrientationChangeSource::Interactive
+    );
+    void reorientCamera(
+        SoCamera* camera,
+        const SbRotation& rotation,
         const SbVec3f& rotationCenter,
         OrientationChangeSource source = OrientationChangeSource::Interactive
     );
@@ -346,9 +352,12 @@ protected:
 private:
     struct OrbitDragState
     {
-        SbVec3f center;
-        float minDistance = 0.0F;
-        float clippingRadius = 0.0F;
+        // Double precision: the orbit anchor must not be quantized to the
+        // float32 grid (64 mm at 1e9 mm absolute coordinates) or the first
+        // drag frame visibly jumps the camera.
+        SbVec3d center;
+        double minDistance = 0.0;
+        double clippingRadius = 0.0;
         float sensitivity = 1.0F;
     };
 
@@ -357,7 +366,7 @@ private:
     void spinSimplifiedInternal(
         const SbVec2f curpos,
         const SbVec2f prevpos,
-        const SbVec3f* rotationCenter
+        const SbVec3d* rotationCenter
     );
     bool getObjectBoundingSphere(SbSphere& sphere) const;
     bool getObjectBoundingBoxCenter(SbVec3f& center) const;
