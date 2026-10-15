@@ -41,6 +41,7 @@ public:
     void start(const std::shared_ptr<NavigationAnimation>& animation);
     bool startAndWait(const std::shared_ptr<NavigationAnimation>& animation);
     void stop();
+    void finish();
     bool isAnimating() const;
 
 private:

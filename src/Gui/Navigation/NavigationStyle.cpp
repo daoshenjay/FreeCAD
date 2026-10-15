@@ -1933,6 +1933,11 @@ void NavigationStyle::stopAnimating() const
     animator->stop();
 }
 
+void NavigationStyle::finishAnimating() const
+{
+    animator->finish();
+}
+
 void NavigationStyle::setSensitivity(float val)
 {
     this->sensitivity = val;

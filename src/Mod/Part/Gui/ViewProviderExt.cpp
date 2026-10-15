@@ -50,6 +50,8 @@
 
 #include <QAction>
 #include <QMenu>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <sstream>
 
@@ -80,6 +82,7 @@
 
 #include <Gui/BitmapFactory.h>
 #include <Gui/Control.h>
+#include <Gui/Inventor/SoFCTransform.h>
 #include <Gui/Selection/SoFCSelectionAction.h>
 #include <Gui/Selection/SoFCUnifiedSelection.h>
 #include <Gui/ViewParams.h>
@@ -291,6 +294,9 @@ ViewProviderPartExt::~ViewProviderPartExt()
     pcPointStyle->unref();
     pShapeHints->unref();
     coords->unref();
+    if (visualCoordOffset) {
+        visualCoordOffset->unref();
+    }
     faceset->unref();
     norm->unref();
     normb->unref();
@@ -595,6 +601,17 @@ void ViewProviderPartExt::attach(App::DocumentObject* pcFeat)
 
     // Move 'coords' before the switch
     pcRoot->insertChild(coords, pcRoot->findChild(pcModeSwitch));
+
+    // Shapes with large absolute local coordinates are rendered relative to
+    // a reference point so the float32 vertices stay in a range where the
+    // float32 ULP is insignificant. The reference point is added back
+    // through this transform, see setupCoinGeometry().
+    if (hasVisualCoordOffset()) {
+        visualCoordOffset = new Gui::SoFCTransform();
+        visualCoordOffset->ref();
+        visualCoordOffset->setName("VisualCoordOffset");
+        pcRoot->insertChild(visualCoordOffset, pcRoot->findChild(pcModeSwitch));
+    }
 
     // putting all together with the switch
     addDisplayMaskMode(pcNormalRoot, "Flat Lines");
@@ -1115,6 +1132,46 @@ void ViewProviderPartExt::unsetEdit(int ModNum)
     }
 }
 
+namespace
+{
+// Above this magnitude (in mm) the float32 ULP of the raw vertex
+// coordinates becomes visually significant (0.12 mm at 1e6 mm), so the
+// shape is rendered relative to a reference point taken from its bounding
+// box. Below it the vertices are written unchanged, i.e. the exact
+// historic output is preserved.
+constexpr double visualCoordOffsetThreshold = 1.0e6;
+
+/** Reference point for the float32 safe rendering frame.
+ *
+ * Returns the center of the shape's bounding box when the local
+ * coordinates are far away from the origin, otherwise the zero vector.
+ * The caller must pass the shape with its top level location already
+ * stripped, i.e. the same coordinate system the Coin vertices use.
+ */
+Base::Vector3d computeVisualCoordOffset(const TopoDS_Shape& shape)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    if (box.IsVoid()) {
+        return Base::Vector3d();
+    }
+    Standard_Real x0, y0, z0, x1, y1, z1;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    const double maxAbs = std::max(
+        {std::fabs(x0),
+         std::fabs(y0),
+         std::fabs(z0),
+         std::fabs(x1),
+         std::fabs(y1),
+         std::fabs(z1)}
+    );
+    if (maxAbs < visualCoordOffsetThreshold) {
+        return Base::Vector3d();
+    }
+    return Base::Vector3d(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
+}
+}  // namespace
+
 void ViewProviderPartExt::setupCoinGeometry(
     TopoDS_Shape shape,
     SoCoordinate3* coords,
@@ -1124,10 +1181,14 @@ void ViewProviderPartExt::setupCoinGeometry(
     SoBrepPointSet* nodeset,
     double deviation,
     double angularDeflection,
-    bool normalsFromUV
+    bool normalsFromUV,
+    SoTransform* offsetNode
 )
 {
     if (Part::Tools::isShapeEmpty(shape)) {
+        if (offsetNode) {
+            offsetNode->translation.setValue(0.0F, 0.0F, 0.0F);
+        }
         coords->point.setNum(0);
         norm->vector.setNum(0);
         faceset->coordIndex.setNum(0);
@@ -1184,6 +1245,24 @@ void ViewProviderPartExt::setupCoinGeometry(
     // are set in the placement property
     TopLoc_Location aLoc;
     shape.Location(aLoc);
+
+    // The vertices are written relative to this reference point and the
+    // point is added back through offsetNode, so the float32 vertices stay
+    // small while the world position stays exact (up to the float32 ULP of
+    // the reference point itself, like for large placements). Without an
+    // offset node (other callers of this function) the vertices must stay
+    // in their original coordinate system.
+    const Base::Vector3d coordOffset =
+        offsetNode ? computeVisualCoordOffset(shape) : Base::Vector3d();
+    if (offsetNode) {
+        offsetNode->translation.setValue(
+            static_cast<float>(coordOffset.x),
+            static_cast<float>(coordOffset.y),
+            static_cast<float>(coordOffset.z)
+        );
+    }
+    const bool shifted = (coordOffset.x != 0.0 || coordOffset.y != 0.0 || coordOffset.z != 0.0);
+    const gp_Vec negOffset(-coordOffset.x, -coordOffset.y, -coordOffset.z);
 
     // count triangles and nodes in the mesh
     TopTools_IndexedMapOfShape faceMap;
@@ -1366,6 +1445,14 @@ void ViewProviderPartExt::setupCoinGeometry(
             norms[faceNodeOffset + N2 - 1] += Base::convertTo<SbVec3f>(NV2);
             norms[faceNodeOffset + N3 - 1] += Base::convertTo<SbVec3f>(NV3);
 
+            // shift into the float32 safe rendering frame; the normals
+            // above are directions and must not be translated
+            if (shifted) {
+                V1.Translate(negOffset);
+                V2.Translate(negOffset);
+                V3.Translate(negOffset);
+            }
+
             // set the vertices
             verts[faceNodeOffset + N1 - 1] = Base::convertTo<SbVec3f>(V1);
             verts[faceNodeOffset + N2 - 1] = Base::convertTo<SbVec3f>(V2);
@@ -1418,6 +1505,9 @@ void ViewProviderPartExt::setupCoinGeometry(
                     if (!identity) {
                         p.Transform(myTransf);
                     }
+                    if (shifted) {
+                        p.Translate(negOffset);
+                    }
                     verts[index] = Base::convertTo<SbVec3f>(p);
                 }
 
@@ -1459,6 +1549,9 @@ void ViewProviderPartExt::setupCoinGeometry(
                     if (!identity) {
                         pnt.Transform(myTransf);
                     }
+                    if (shifted) {
+                        pnt.Translate(negOffset);
+                    }
                     int index = faceNodeOffset + j - 1;
                     verts[index] = Base::convertTo<SbVec3f>(pnt);
                     lineSetMap[i].push_back(index);
@@ -1474,6 +1567,9 @@ void ViewProviderPartExt::setupCoinGeometry(
     for (int i = 0; i < vertexMap.Extent(); i++) {
         const TopoDS_Vertex& aVertex = TopoDS::Vertex(vertexMap(i + 1));
         gp_Pnt pnt = BRep_Tool::Pnt(aVertex);
+        if (shifted) {
+            pnt.Translate(negOffset);
+        }
 
         verts[faceNodeOffset + i] = Base::convertTo<SbVec3f>(pnt);
         coordsMap[i + 1] = faceNodeOffset + i;
@@ -1620,12 +1716,17 @@ void ViewProviderPartExt::updateVisual()
             nodeset,
             Deviation.getValue(),
             AngularDeflection.getValue(),
-            NormalsFromUV
+            NormalsFromUV,
+            visualCoordOffset
         );
 
         lastRenderedShape = shape;
 
         VisualTouched = false;
+
+        // The rendering frame may have changed with the shape, so refresh
+        // the bounding box wireframe which is rendered inside it.
+        updateBoundingBox();
     }
     catch (const Standard_Failure& e) {
         FC_ERR(

@@ -66,6 +66,15 @@ public:
 protected:
     void updatePlane();
 
+    /** The 2D view providers render parallel scene graphs of their own
+     * (plane, grid, sketch edit mode) below the shared root, so they must
+     * not take part in the visual coordinate offset compensation.
+     */
+    bool hasVisualCoordOffset() const override
+    {
+        return false;
+    }
+
     Gui::CoinPtr<SoSwitch> plane;
 };
 

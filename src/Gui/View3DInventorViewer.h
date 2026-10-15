@@ -231,6 +231,7 @@ public:
     ) const;
     void startSpinningAnimation(const SbVec3f& axis, float velocity);
     void stopAnimating();
+    void finishAnimating();
 
     void setPopupMenuEnabled(bool on);
     bool isPopupMenuEnabled() const;

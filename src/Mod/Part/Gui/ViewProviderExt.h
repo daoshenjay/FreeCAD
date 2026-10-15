@@ -52,6 +52,7 @@ class SbVec3f;
 class SoSphere;
 class SoScale;
 class SoCoordinate3;
+class SoTransform;
 class SoIndexedFaceSet;
 class SoNormal;
 class SoNormalBinding;
@@ -189,7 +190,8 @@ public:
         SoBrepPointSet* nodeset,
         double deviation,
         double angularDeflection,
-        bool normalsFromUV = false
+        bool normalsFromUV = false,
+        SoTransform* offsetNode = nullptr
     );
 
     static void setupCoinGeometry(
@@ -210,6 +212,18 @@ protected:
     void onChanged(const App::Property* prop) override;
     bool loadParameter();
     void updateVisual();
+    /** Whether this view provider installs the visual coordinate offset node.
+     *
+     * The node compensates float32 vertex quantization for shapes whose
+     * local coordinates are far away from the origin (see
+     * setupCoinGeometry()). View providers that render their own parallel
+     * scene graphs below the shared root (grids, sketch edit mode, ...)
+     * must opt out so those graphs keep their exact placement.
+     */
+    virtual bool hasVisualCoordOffset() const
+    {
+        return true;
+    }
     /** Double precision bounding box for shapes.
      *
      * The generic implementation measures the Coin scene graph, whose
@@ -251,6 +265,11 @@ protected:
     SoShapeHints* pShapeHints;
 
     SoCoordinate3* coords;
+    // Compensates the float32 quantization of the shape coordinates for
+    // large absolute local geometry; null when hasVisualCoordOffset() is
+    // false. Kept as SoTransform to avoid a Gui Inventor include here, the
+    // concrete node is a Gui::SoFCTransform.
+    SoTransform* visualCoordOffset {nullptr};
     SoBrepFaceSet* faceset;
     SoNormal* norm;
     SoNormalBinding* normb;

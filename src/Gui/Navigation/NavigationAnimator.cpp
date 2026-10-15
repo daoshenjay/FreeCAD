@@ -92,6 +92,21 @@ void NavigationAnimator::stop()
 }
 
 /**
+ * @brief Completes an active animation immediately, snapping the animated
+ * object to its final pose
+ */
+void NavigationAnimator::finish()
+{
+    if (activeAnimation && activeAnimation->state() == QAbstractAnimation::State::Running) {
+        disconnect(activeAnimation.get(), &NavigationAnimation::finished, 0, 0);
+        Q_EMIT activeAnimation->interrupted();
+        activeAnimation->stop();
+        activeAnimation->onStop(true);
+        activeAnimation.reset();
+    }
+}
+
+/**
  * @return Whether or not an animation is active
  */
 bool NavigationAnimator::isAnimating() const

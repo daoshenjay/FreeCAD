@@ -34,7 +34,10 @@
 #include <Inventor/nodes/SoResetTransform.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoSwitch.h>
+#include <Inventor/nodes/SoTransform.h>
 #include <Inventor/sensors/SoNodeSensor.h>
+
+#include <cstring>
 
 #include <App/GeoFeature.h>
 #include <App/PropertyGeo.h>
@@ -203,8 +206,29 @@ void ViewProviderGeometryObject::updateBoundingBox()
         if (!box.IsValid()) {
             return;
         }
-        pcBoundingBox->minBounds.setValue(box.MinX, box.MinY, box.MinZ);
-        pcBoundingBox->maxBounds.setValue(box.MaxX, box.MaxY, box.MaxZ);
+        // View providers may render their vertices relative to a reference
+        // point and add it back through a transform named "VisualCoordOffset"
+        // (see PartGui::ViewProviderPartExt::setupCoinGeometry()). The
+        // bounding box wireframe lives inside that frame as well, so the
+        // offset must be undone to keep the box in placement relative
+        // coordinates like the measured box itself.
+        double offX = 0.0, offY = 0.0, offZ = 0.0;
+        if (pcRoot) {
+            for (int i = 0; i < pcRoot->getNumChildren(); ++i) {
+                SoNode* child = pcRoot->getChild(i);
+                if (child->isOfType(SoTransform::getClassTypeId())
+                    && std::strcmp(child->getName(), "VisualCoordOffset") == 0) {
+                    const SbVec3f translation =
+                        static_cast<SoTransform*>(child)->translation.getValue();
+                    offX = translation[0];
+                    offY = translation[1];
+                    offZ = translation[2];
+                    break;
+                }
+            }
+        }
+        pcBoundingBox->minBounds.setValue(box.MinX - offX, box.MinY - offY, box.MinZ - offZ);
+        pcBoundingBox->maxBounds.setValue(box.MaxX - offX, box.MaxY - offY, box.MaxZ - offZ);
     }
 }
 

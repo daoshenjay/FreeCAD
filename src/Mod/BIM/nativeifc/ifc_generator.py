@@ -475,6 +475,16 @@ def set_representation(vobj, node):
     coords = find_node(vobj.RootNode, coin.SoCoordinate3)
     if not coords:
         return
+    # The view provider may render the shape coordinates relative to a
+    # reference point and add it back through a transform (large absolute
+    # coordinates, see PartGui ViewProviderPartExt::setupCoinGeometry()).
+    # The vertices written here are absolute, so undo that offset first.
+    offset = (0.0, 0.0, 0.0)
+    for i in range(vobj.RootNode.getNumChildren()):
+        child = vobj.RootNode.getChild(i)
+        if isinstance(child, coin.SoTransform) and child.getName() == "VisualCoordOffset":
+            offset = child.translation.getValue()
+            break
     switch = find_node(vobj.RootNode, coin.SoSwitch)
     if not switch:
         return
@@ -502,7 +512,11 @@ def set_representation(vobj, node):
     if not node:
         return
     if node[1] and node[3] and eset:
-        coords.point.setValues(node[1])
+        verts = node[1]
+        if offset != (0.0, 0.0, 0.0):
+            ox, oy, oz = offset
+            verts = [(v[0] - ox, v[1] - oy, v[2] - oz) for v in verts]
+        coords.point.setValues(verts)
         eset.coordIndex.setValues(node[3])
         if node[2] and node[4] and fset:
             fset.coordIndex.setValues(node[2])

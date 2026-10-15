@@ -207,6 +207,7 @@ public:
 
     void startAnimating(const std::shared_ptr<NavigationAnimation>& animation, bool wait = false) const;
     void stopAnimating() const;
+    void finishAnimating() const;
 
     void setSensitivity(float);
     float getSensitivity() const;

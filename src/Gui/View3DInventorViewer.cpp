@@ -4586,8 +4586,12 @@ void View3DInventorViewer::animatedViewAll(const SbBox3d& box, int steps, int ms
     if (cam->isOfType(SoOrthographicCamera::getClassTypeId())) {
         isOrthographic = true;
         height = static_cast<SoOrthographicCamera*>(cam)->height.getValue();  // NOLINT
+        // Target the same height viewBoundingBox() ends up with (see
+        // SoOrthographicCamera::viewBoundingBox): 2r for aspect >= 1 and
+        // 2r/aspect for a taller-than-wide viewport, otherwise the final
+        // fit would snap the view to a different size again.
         if (aspectRatio < 1.0F) {
-            diff = radius * 2 - double(height) * double(aspectRatio);
+            diff = radius * 2 / double(aspectRatio) - double(height);
         }
         else {
             diff = radius * 2 - double(height);
@@ -4596,7 +4600,9 @@ void View3DInventorViewer::animatedViewAll(const SbBox3d& box, int steps, int ms
     }
     else if (cam->isOfType(SoPerspectiveCamera::getClassTypeId())) {
         // NOLINTBEGIN
-        double movelength = radius
+        const double aspectradius =
+            radius / (aspectRatio < 1.0F ? double(aspectRatio) : 1.0);
+        double movelength = aspectradius
             / tan(static_cast<SoPerspectiveCamera*>(cam)->heightAngle.getValue() / 2.0);
         // NOLINTEND
         pos = center - dir * movelength;
@@ -4687,9 +4693,8 @@ void View3DInventorViewer::viewAll()
         static_cast<SoPerspectiveCamera*>(cam)->heightAngle = (float)(M_PI / 4.0);
     }
 
-    if (isAnimationEnabled()) {
-        animatedViewAll(box, 10, 20);
-    }
+    // viewBoundBox() below runs the fit animation itself (targeted at the
+    // quantized box), so do not animate to the raw box here first.
 
     viewBoundBox(box);
 }
@@ -5066,13 +5071,19 @@ void View3DInventorViewer::viewBoundBox(const SbBox3f& box)
 
 void View3DInventorViewer::viewBoundBox(const SbBox3d& box)
 {
-    if (isAnimationEnabled()) {
-        animatedViewAll(box, 10, 20);
-    }
-
     SoCamera* cam = getSoRenderManager()->getCamera();
     if (!cam) {
         return;
+    }
+
+    // An in-flight orientation animation (e.g. ViewFront followed quickly by
+    // a fit) keeps repositioning the camera around its stale rotation center
+    // and shifting the near/far planes on every tick; it would clobber the
+    // pose this function is about to finalize and leave the camera millions
+    // of millimetres away from the scene.  Snap it to its final pose first;
+    // the fit below then owns the camera state.
+    if (isAnimating()) {
+        finishAnimating();
     }
 
     float aspectratio = getSoRenderManager()->getViewportRegion().getViewportAspectRatio();
@@ -5085,7 +5096,55 @@ void View3DInventorViewer::viewBoundBox(const SbBox3d& box)
         default:
             break;
     }
+    // Frame the raw double box with the plain sphere fit: the size comes
+    // from the object's real extents, exactly like a fit without any large
+    // coordinate handling.  Wrapping the box (outward quantization to the
+    // float32 grid plus a per-axis minimum) made the view volume track the
+    // grid step instead of the object: a few dozen millimetres of line at
+    // 1e9..2e9 mm were framed two to four times larger than needed and
+    // appeared far too small on screen.  Geometry near a frustum plane used
+    // to vanish under such thin views because the float32 bounding box
+    // culling test missed it; that is fixed in SoCullElement instead, so
+    // the tight framing needs no compensation here.
+    double maxabs = 0.0;
+    if (!box.isEmpty()) {
+        double b[6];
+        box.getBounds(b[0], b[1], b[2], b[3], b[4], b[5]);
+        for (double v : b) {
+            maxabs = std::max(maxabs, std::fabs(v));
+        }
+    }
+    const double ulp = (maxabs > 1.0) ? std::ldexp(1.0, std::ilogb(maxabs) - 23) : 0.0;
+
+    // Animate toward the same box the final fit below uses so the view does
+    // not snap to a different size once the animation has finished.
+    if (isAnimationEnabled()) {
+        animatedViewAll(box, 10, 20);
+    }
+
     cam->viewBoundingBox(box, double(aspectratio), 1.0);
+
+    // viewBoundingBox() leaves near/far tangent to the bounding sphere.  The
+    // float32 camera math can put the geometry about one grid step across a
+    // tangent plane, so push both planes out by two grid steps: fit recomputes
+    // them from scratch each time, so this cannot accumulate, and rotation /
+    // zoom preserve the span.  Near the origin the step is ~1e-7 mm and the
+    // planes stay effectively tangent.
+    if (ulp > 0.0) {
+        const float margin = static_cast<float>(2.0 * ulp);
+        float nearv = cam->nearDistance.getValue();
+        float farv = cam->farDistance.getValue();
+        if (cam->getTypeId().isDerivedFrom(SoOrthographicCamera::getClassTypeId())) {
+            // Negative near is legal for ortho (Camera::fitToBox uses it) and
+            // is the only way to gain margin on the near side.
+            nearv = std::min(nearv, -margin);
+        }
+        else {
+            nearv = std::max(nearv - margin, farv * 1e-6f);
+        }
+        cam->nearDistance = nearv;
+        cam->farDistance = farv + margin;
+    }
 }
 
 /**
@@ -5207,6 +5266,11 @@ void View3DInventorViewer::startSpinningAnimation(const SbVec3f& axis, float vel
 void View3DInventorViewer::stopAnimating()
 {
     navigation->stopAnimating();
+}
+
+void View3DInventorViewer::finishAnimating()
+{
+    navigation->finishAnimating();
 }
 
 void View3DInventorViewer::setPopupMenuEnabled(bool on)
