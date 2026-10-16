@@ -5076,6 +5076,26 @@ void View3DInventorViewer::viewBoundBox(const SbBox3d& box)
         return;
     }
 
+    // A box without any extent at all (a point) yields a zero radius bounding
+    // sphere, so viewBoundingBox() would collapse the view volume onto a single
+    // millimetre fraction -- or push it to infinity through the division by the
+    // resulting zero size.  Some screen space annotations measure exactly such a
+    // box, so leave the view alone instead of destroying it.
+    if (box.isEmpty()) {
+        return;
+    }
+    {
+        double minx, miny, minz, maxx, maxy, maxz;
+        box.getBounds(minx, miny, minz, maxx, maxy, maxz);
+        if (!(std::isfinite(minx) && std::isfinite(miny) && std::isfinite(minz)
+              && std::isfinite(maxx) && std::isfinite(maxy) && std::isfinite(maxz))) {
+            return;
+        }
+        if (maxx <= minx && maxy <= miny && maxz <= minz) {
+            return;
+        }
+    }
+
     // An in-flight orientation animation (e.g. ViewFront followed quickly by
     // a fit) keeps repositioning the camera around its stale rotation center
     // and shifting the near/far planes on every tick; it would clobber the

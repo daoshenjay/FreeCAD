@@ -35,8 +35,11 @@
 #include <Inventor/nodes/SoCamera.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoSwitch.h>
+#include <Inventor/nodes/SoTransformation.h>
+#include <Inventor/nodes/SoTranslation.h>
 #include <Inventor/nodes/SoTransform.h>
 
+#include <cmath>
 #include <unordered_map>
 
 #include <Base/BoundBox.h>
@@ -1173,6 +1176,221 @@ Base::BoundBox3d ViewProvider::getBoundingBox(
     return _getBoundingBox(subname, mat, transform, viewer, depth);
 }
 
+namespace
+{
+
+/** Spacing of a 32 bit float (its ULP) around \a value. */
+double float32Ulp(double value)
+{
+    value = std::fabs(value);
+    if (value == 0.0) {
+        return 0.0;
+    }
+    int exponent = 0;
+    std::frexp(value, &exponent);
+    // frexp() returns value = m * 2^exponent with 0.5 <= m < 1, so the
+    // exponent of the value itself is exponent - 1.
+    return std::ldexp(1.0, exponent - 24);
+}
+
+/** Linear part and translation of a root level transform chain.
+ *
+ *  The translation is deliberately kept in double precision: the root level
+ *  nodes of the Draft annotations store ``float32(Base)`` in the view provider
+ *  transform and the sub ULP remainder in a separate node right below it.  A
+ *  float32 matrix would round that composition right back onto the float32
+ *  lattice (64 mm at 1e9 mm) and throw the remainder away again, which is
+ *  exactly what the separate node is there to avoid.
+ */
+struct RootFrame
+{
+    SbMatrix linear;             //!< rotation/scale only, no translation
+    Base::Vector3d translation;  //!< accumulated translation in double precision
+};
+
+/** Split \a node into its linear part and its translation.
+ *
+ *  Returns false for anything that is not a plain translation or a rotation
+ *  without centre, scale or scale orientation, so that the caller can fall back
+ *  to the legacy behaviour instead of silently producing a wrong frame.
+ */
+bool nodeFrame(const SoNode* node, SbMatrix& linear, Base::Vector3d& translation)
+{
+    if (node->isOfType(SoTranslation::getClassTypeId())) {
+        const auto* translate = static_cast<const SoTranslation*>(node);
+        const SbVec3f value = translate->translation.getValue();
+        linear.makeIdentity();
+        translation.Set(value[0], value[1], value[2]);
+        return true;
+    }
+    if (node->isOfType(SoTransform::getClassTypeId())) {
+        const auto* transform = static_cast<const SoTransform*>(node);
+        if (transform->scaleFactor.getValue() != SbVec3f(1.0f, 1.0f, 1.0f)
+            || transform->scaleOrientation.getValue() != SbRotation::identity()
+            || transform->center.getValue() != SbVec3f(0.0f, 0.0f, 0.0f)) {
+            return false;
+        }
+        const SbVec3f value = transform->translation.getValue();
+        linear.setRotate(transform->rotation.getValue());
+        translation.Set(value[0], value[1], value[2]);
+        return true;
+    }
+    return false;
+}
+
+/** Drop the translation of \a matrix, keeping its rotation and scale.
+ *
+ *  SbMatrix::setTranslate() cannot be used for this: it resets the whole matrix
+ *  to a pure translation, so the rotation would be lost along the way.
+ */
+void stripTranslation(SbMatrix& matrix)
+{
+    matrix[3][0] = 0.0f;
+    matrix[3][1] = 0.0f;
+    matrix[3][2] = 0.0f;
+}
+
+/** Apply the linear part of \a linear to the double precision vector \a value. */
+Base::Vector3d applyLinear(const SbMatrix& linear, const Base::Vector3d& value)
+{
+    SbMatrix matrix = linear;
+    stripTranslation(matrix);
+    SbVec3f x, y, z;
+    matrix.multVecMatrix(SbVec3f(1.0f, 0.0f, 0.0f), x);
+    matrix.multVecMatrix(SbVec3f(0.0f, 1.0f, 0.0f), y);
+    matrix.multVecMatrix(SbVec3f(0.0f, 0.0f, 1.0f), z);
+    return Base::Vector3d(
+        double(x[0]) * value.x + double(y[0]) * value.y + double(z[0]) * value.z,
+        double(x[1]) * value.x + double(y[1]) * value.y + double(z[1]) * value.z,
+        double(x[2]) * value.x + double(y[2]) * value.y + double(z[2]) * value.z
+    );
+}
+
+/** Accumulate the transformation contributed by the children of \a root that
+ *  come before \a modeSwitch, leaving out \a skipNode.
+ *
+ *  Coin's SoGetMatrixAction cannot be used here: applying it to a path whose
+ *  head is a ViewProvider root (an SoFCSelectionRoot) crashes, and an SbMatrix
+ *  is float32 anyway.  The frame is composed directly instead, with the
+ *  translation kept in double precision.
+ */
+bool accumulateRootFrame(SoSeparator* root,
+                         SoNode* modeSwitch,
+                         SoNode* skipNode,
+                         RootFrame& frame)
+{
+    frame.linear.makeIdentity();
+    frame.translation.Set(0.0, 0.0, 0.0);
+    const int count = root ? root->getNumChildren() : 0;
+    bool sawNode = false;
+    for (int i = 0; i < count; ++i) {
+        SoNode* child = root->getChild(i);
+        if (child == modeSwitch) {
+            break;
+        }
+        if (child == skipNode) {
+            continue;
+        }
+        if (!child->isOfType(SoTransformation::getClassTypeId())) {
+            continue;
+        }
+        SbMatrix linear;
+        Base::Vector3d translation;
+        if (!nodeFrame(child, linear, translation)) {
+            frame.linear.makeIdentity();
+            frame.translation.Set(0.0, 0.0, 0.0);
+            return false;
+        }
+        // The node sits below everything accumulated so far, so its own
+        // translation is mapped by the rotation of the frame first.  Only the
+        // translations need double precision, the linear parts stay free of
+        // large values.  The matrices are row vector ones, so the inner node
+        // is multiplied in from the left.
+        frame.translation = applyLinear(frame.linear, translation) + frame.translation;
+        frame.linear.multLeft(linear);
+        sawNode = true;
+    }
+    return sawNode;
+}
+
+/** Map \a box through \a frame, keeping the accumulated translation in double. */
+Base::BoundBox3d mapBox(const Base::BoundBox3d& box, const RootFrame& frame)
+{
+    if (!box.IsValid()) {
+        return Base::BoundBox3d();
+    }
+    SbMatrix matrix = frame.linear;
+    stripTranslation(matrix);
+    const double xs[2] = {box.MinX, box.MaxX};
+    const double ys[2] = {box.MinY, box.MaxY};
+    const double zs[2] = {box.MinZ, box.MaxZ};
+    Base::BoundBox3d result;
+    for (int i = 0; i < 8; ++i) {
+        SbVec3f local, global;
+        local.setValue(float(xs[i & 1]), float(ys[(i >> 1) & 1]), float(zs[(i >> 2) & 1]));
+        matrix.multVecMatrix(local, global);
+        result.Add(Base::Vector3d(double(global[0]) + frame.translation.x,
+                                  double(global[1]) + frame.translation.y,
+                                  double(global[2]) + frame.translation.z));
+    }
+    return result;
+}
+
+/** Check whether the measured float32 box agrees with the expected double box.
+ *
+ *  A world space annotation is only quantized to the float32 ULP of the
+ *  absolute coordinates, so its measured box still sits on the expected one.
+ *  Screen space text (SoText2) reports its box in projection units instead,
+ *  which lands at the origin no matter where the text is anchored.
+ */
+bool matchesExpectedBox(const SbBox3f& measured, const Base::BoundBox3d& expected)
+{
+    if (measured.isEmpty() || !expected.IsValid()) {
+        return false;
+    }
+    float minX, minY, minZ, maxX, maxY, maxZ;
+    measured.getBounds(minX, minY, minZ, maxX, maxY, maxZ);
+    if (!(minX <= maxX && minY <= maxY && minZ <= maxZ)) {
+        return false;
+    }
+    const double dx = (double(minX) + double(maxX)) * 0.5 - (expected.MinX + expected.MaxX) * 0.5;
+    const double dy = (double(minY) + double(maxY)) * 0.5 - (expected.MinY + expected.MaxY) * 0.5;
+    const double dz = (double(minZ) + double(maxZ)) * 0.5 - (expected.MinZ + expected.MaxZ) * 0.5;
+    const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    double scale = std::fmax(std::fabs(expected.MinX), std::fabs(expected.MaxX));
+    scale = std::fmax(scale, std::fmax(std::fabs(expected.MinY), std::fabs(expected.MaxY)));
+    scale = std::fmax(scale, std::fmax(std::fabs(expected.MinZ), std::fabs(expected.MaxZ)));
+
+    return distance <= 4.0 * float32Ulp(scale) + 0.01;
+}
+
+/** A box around \a anchor with a strictly positive size.
+ *
+ *  Screen space annotations have no meaningful world extent at all, so they are
+ *  framed at the point they are drawn from.  A degenerate box would make the
+ *  view volume collapse to a point instead, and an oversized one would distort
+ *  the fit of the whole document, so the size follows the float32 resolution of
+ *  the coordinates.
+ */
+Base::BoundBox3d anchorBox(const Base::Vector3d& anchor)
+{
+    const double scale = std::fmax(std::fabs(anchor.x),
+                                   std::fmax(std::fabs(anchor.y), std::fabs(anchor.z)));
+    const double radius = std::fmax(1.0, float32Ulp(scale));
+    return Base::BoundBox3d(anchor.x - radius, anchor.y - radius, anchor.z - radius,
+                            anchor.x + radius, anchor.y + radius, anchor.z + radius);
+}
+
+Base::BoundBox3d toBoundBox(const SbBox3f& box)
+{
+    float minX, minY, minZ, maxX, maxY, maxZ;
+    box.getBounds(minX, minY, minZ, maxX, maxY, maxZ);
+    return Base::BoundBox3d(minX, minY, minZ, maxX, maxY, maxZ);
+}
+
+}  // namespace
+
 Base::BoundBox3d ViewProvider::_getBoundingBox(
     const char* subname,
     const Base::Matrix4D* mat,
@@ -1192,6 +1410,42 @@ Base::BoundBox3d ViewProvider::_getBoundingBox(
             return Base::BoundBox3d();
         }
     }
+
+    // The Draft annotations (text, dimension, label) keep their large world
+    // translation in a separate root level node that sits between pcTransform
+    // and pcModeSwitch instead of putting it into pcTransform.  Measuring those
+    // objects with the float32 box quantizes the result down to the float32 ULP
+    // of the absolute coordinates (64 mm at 1e9 mm), so the box is taken in the
+    // anchored local frame and mapped through a double precision root frame
+    // below.  Objects without such an extra node keep the legacy code path and
+    // stay bit for bit identical.
+    RootFrame anchorFrame;
+    RootFrame totalFrame;
+    bool hasAnchor = false;
+    {
+        const int modeIndex = pcRoot->findChild(pcModeSwitch);
+        const int transformIndex = pcRoot->findChild(pcTransform);
+        bool anchorNode = false;
+        for (int i = 0; i < modeIndex; ++i) {
+            if (i == transformIndex) {
+                continue;
+            }
+            if (pcRoot->getChild(i)->isOfType(SoTransformation::getClassTypeId())) {
+                anchorNode = true;
+                break;
+            }
+        }
+        // Note that the extra node is honoured even when it is an identity
+        // transform: the Draft text view provider keeps only the sub ULP
+        // remainder there, which is zero for a placement that happens to sit
+        // on the float32 lattice.  Falling back to the float32 box in that case
+        // would quantize the annotation by a full ULP.
+        if (anchorNode) {
+            hasAnchor = accumulateRootFrame(pcRoot, pcModeSwitch, pcTransform, anchorFrame)
+                && accumulateRootFrame(pcRoot, pcModeSwitch, nullptr, totalFrame);
+        }
+    }
+
     static thread_local SoGetBoundingBoxAction* bboxAction;
     if (!bboxAction) {
         bboxAction = new SoGetBoundingBoxAction(SbViewportRegion());
@@ -1230,11 +1484,6 @@ Base::BoundBox3d ViewProvider::_getBoundingBox(
     static thread_local SoTempPath resetPath(3);
     resetPath.ref();
     resetPath.truncate(0);
-    if (!transform) {
-        resetPath.append(pcRoot);
-        resetPath.append(pcModeSwitch);
-        bboxAction->setResetPath(&resetPath, true, SoGetBoundingBoxAction::TRANSFORM);
-    }
 
     // If the object is hidden, we must temporarily make it visible
     // so the bounding box action can traverse the geometry.
@@ -1247,7 +1496,67 @@ Base::BoundBox3d ViewProvider::_getBoundingBox(
         path.append(pcRoot);
         path.append(pcModeSwitch);
     }
-    bboxAction->apply(&path);
+
+    // Measure the object either with the root transformations applied (the
+    // float32 world box) or with them reset at pcModeSwitch (the box in the
+    // frame above the root transformation).
+    auto measure = [&](bool reset) -> SbXfBox3f& {
+        if (reset) {
+            resetPath.truncate(0);
+            resetPath.append(pcRoot);
+            resetPath.append(pcModeSwitch);
+            bboxAction->setResetPath(&resetPath, true, SoGetBoundingBoxAction::TRANSFORM);
+        }
+        bboxAction->apply(&path);
+        if (reset) {
+            resetPath.truncate(0);
+            bboxAction->setResetPath(nullptr, false);
+        }
+        return bboxAction->getXfBoundingBox();
+    };
+
+    Base::BoundBox3d box;
+    bool finished = false;
+    if (hasAnchor) {
+        const Base::BoundBox3d local = toBoundBox(measure(true).project());
+        if (transform) {
+            const Base::BoundBox3d expected = mapBox(local, totalFrame);
+            // Screen space text measures its box in projection units, so it
+            // ends up somewhere else entirely.  Such a box is replaced by the
+            // anchor the text is drawn from, which keeps the annotation visible
+            // without dragging the view to a bogus position.
+            if (matchesExpectedBox(measure(false).project(), expected)) {
+                box = expected;
+            }
+            else {
+                box = anchorBox(totalFrame.translation);
+            }
+            finished = true;
+        }
+        else {
+            // Only strip pcTransform (the view provider placement); the
+            // coordinate offset of the anchor node belongs to the geometry and
+            // has to stay, otherwise boxes measured below a container (App::Part)
+            // end up at the origin.
+            if (matchesExpectedBox(measure(false).project(), mapBox(local, totalFrame))) {
+                box = mapBox(local, anchorFrame);
+            }
+            else {
+                box = anchorBox(anchorFrame.translation);
+            }
+            finished = true;
+        }
+    }
+    if (!finished) {
+        auto& xbbox = measure(!transform);
+        if (mat) {
+            xbbox.transform(convert(*mat));
+        }
+        box = toBoundBox(xbbox.project());
+    }
+    else if (mat) {
+        box = box.Transformed(*mat);
+    }
 
     if (det) {
         delete det;
@@ -1267,20 +1576,11 @@ Base::BoundBox3d ViewProvider::_getBoundingBox(
     path.unrefNoDelete();
     coinRemoveAllChildren(fakeRoot);
 
-    auto xbbox = bboxAction->getXfBoundingBox();
-    if (mat) {
-        xbbox.transform(convert(*mat));
-    }
-    auto bbox = xbbox.project();
-    float minX, minY, minZ, maxX, maxY, maxZ;
-    bbox.getMax().getValue(maxX, maxY, maxZ);
-    bbox.getMin().getValue(minX, minY, minZ);
-
     if (bboxAction) {
         bboxAction->setResetPath(nullptr, false);
     }
 
-    return Base::BoundBox3d(minX, minY, minZ, maxX, maxY, maxZ);
+    return box;
 }
 
 bool ViewProvider::isLinkVisible() const
