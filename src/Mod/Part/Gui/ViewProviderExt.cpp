@@ -1168,7 +1168,24 @@ Base::Vector3d computeVisualCoordOffset(const TopoDS_Shape& shape)
     if (maxAbs < visualCoordOffsetThreshold) {
         return Base::Vector3d();
     }
-    return Base::Vector3d(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
+
+    // The reference point is added back through a float32 transform node, so
+    // it must be exactly representable in float32. An arbitrary double such
+    // as the box center would be rounded to the float32 grid on storage (64 mm
+    // at 1e9 mm) and shift the whole rendered shape by up to half a grid step
+    // away from the exact bounding box the fit and the clipping planes are
+    // computed from: a tight fit clipped the corners and a rotation sliced
+    // through the body. With a float32 exact offset the rendered position
+    // float32(offset) + float32(vertex - offset) reproduces the exact vertex
+    // again.
+    const auto snapToFloat = [](double value) {
+        return static_cast<double>(static_cast<float>(value));
+    };
+    return Base::Vector3d(
+        snapToFloat(0.5 * (x0 + x1)),
+        snapToFloat(0.5 * (y0 + y1)),
+        snapToFloat(0.5 * (z0 + z1))
+    );
 }
 }  // namespace
 

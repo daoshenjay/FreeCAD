@@ -23,6 +23,7 @@
 
 
 #include <Inventor/SbDPLine.h>
+#include <Inventor/SbDPRotation.h>
 #include <Inventor/SbViewportRegion.h>
 #include <Inventor/SoEventManager.h>
 #include <Inventor/SoPickedPoint.h>
@@ -94,6 +95,19 @@ void NavigationStyleContextMenuReceiver::startEditing()
 
 namespace
 {
+
+// Convert a float32 orientation to its double-precision equivalent.  Coin's
+// SbRotation stores a unit quaternion, which is exact in both precisions, so
+// widening the four components is lossless.  This lets the camera-offset math
+// run in double (needed at 1e9 mm absolute coordinates, where a float32 offset
+// vector has a 64 mm grid) while the camera keeps its native float32
+// orientation.
+SbDPRotation toDoubleRotation(const SbRotation& rotation)
+{
+    float q0, q1, q2, q3;
+    rotation.getValue(q0, q1, q2, q3);
+    return SbDPRotation(double(q0), double(q1), double(q2), double(q3));
+}
 
 bool pickedPathContainsDragger(const SoPickedPoint* pick)
 {
@@ -625,6 +639,7 @@ void NavigationStyle::lookAtPoint(const SbVec2s screenpos)
 void NavigationStyle::lookAtPoint(const SbVec3f& position)
 {
     translateCamera(position - viewer->getFocalPoint());
+    this->rotationCenterD = SbVec3d(position);
     this->rotationCenter = position;
     this->rotationCenterFound = true;
 }
@@ -872,10 +887,15 @@ void NavigationStyle::reorientCamera(
         return;
     }
 
-    // Distance from rotation center to camera position in camera coordinate system
-    SbVec3f rotationCenterDistanceCam;
-    currentOrientation.inverse().multVec(
-        SbVec3f(camera->position.getValue() - rotationCenter),
+    // The camera-to-rotation-center offset is a small vector (difference of
+    // two ~1e9 absolute coordinates).  Its float32 ULP at 1e9 is 64 mm, which
+    // would displace the camera by ~64 mm/frame and drift the model out of
+    // view, so the offset is kept in double via SbDPRotation.  The camera
+    // orientation itself is a unit quaternion (rotation angles), so carrying
+    // it in double is exact relative to the float32 orientation.
+    SbVec3d rotationCenterDistanceCam;
+    toDoubleRotation(currentOrientation.inverse()).multVec(
+        camera->position.getValue() - rotationCenter,
         rotationCenterDistanceCam
     );
 
@@ -883,11 +903,14 @@ void NavigationStyle::reorientCamera(
     camera->orientation = targetOrientation;
 
     // Distance from rotation center to new camera position in global coordinate system
-    SbVec3f newRotationCenterDistance;
-    camera->orientation.getValue().multVec(rotationCenterDistanceCam, newRotationCenterDistance);
+    SbVec3d newRotationCenterDistance;
+    toDoubleRotation(targetOrientation).multVec(
+        rotationCenterDistanceCam,
+        newRotationCenterDistance
+    );
 
     // Reposition camera so the rotation center stays in the same place
-    camera->position = rotationCenter + SbVec3d(newRotationCenterDistance);
+    camera->position = rotationCenter + newRotationCenterDistance;
 
     if (camera->getTypeId().isDerivedFrom(SoOrthographicCamera::getClassTypeId())) {
         // Adjust the camera position to keep the focal point in the same place while making sure
@@ -932,6 +955,25 @@ void NavigationStyle::reorientCamera(
             camera->farDistance =
                 float(double(camera->farDistance.getValue()) + shift);
         }
+    }
+
+    // Re-derive near/far from the double-precision scene bounding sphere on
+    // every frame instead of relying on the frozen (fit or once-shifted)
+    // planes.  During a rotation about a pivot that is not the scene center
+    // the model's depth swings by up to 2*|sceneCenter - pivot|, which easily
+    // exceeds the slack the fit left around the scene, so the geometry is
+    // sliced by the near plane or vanishes past the far plane.  Coin's
+    // automatic near/far update is the usual rescue, but at large absolute
+    // coordinates it measures the scene with a float32 bounding box that has
+    // collapsed (nearest <= 0) and therefore keeps the camera's planes, which
+    // is exactly why the mouse-rotation path needs this.
+    if (this->sceneClipRadius <= 0.0) {
+        // Lazily capture the bounds (once per drag or first interactive
+        // rotation) so the per-frame cost stays a single projection.
+        refreshClipDepth();
+    }
+    if (this->sceneClipRadius > 0.0) {
+        applyClipDepth(camera);
     }
 
 #if (COIN_MAJOR_VERSION * 100 + COIN_MINOR_VERSION * 10 + COIN_MICRO_VERSION < 403)
@@ -1289,7 +1331,13 @@ std::optional<SbVec2s>& NavigationStyle::getRightClickPosition()
 
 void NavigationStyle::setRotationCenter(const SbVec3f& cnt)
 {
-    this->rotationCenter = cnt;
+    setRotationCenter(SbVec3d(cnt));
+}
+
+void NavigationStyle::setRotationCenter(const SbVec3d& cnt)
+{
+    this->rotationCenterD = cnt;
+    this->rotationCenter = SbVec3f(cnt);
     this->rotationCenterFound = true;
 
     const auto camera = getCamera();
@@ -1298,7 +1346,7 @@ void NavigationStyle::setRotationCenter(const SbVec3f& cnt)
         camera->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
 
         // Calculate distance from camera to rotation center
-        const auto rotationCenterDistance = SbVec3d(rotationCenter) - camera->position.getValue();
+        const auto rotationCenterDistance = cnt - camera->position.getValue();
         const auto rotationCenterDepth = rotationCenterDistance.dot(SbVec3d(direction));
 
         // Set focal distance to match rotation center depth so we can zoom at the new rotation
@@ -1387,7 +1435,7 @@ void NavigationStyle::spinInternal(const SbVec2f& pointerpos, const SbVec2f& las
     r.invert();
 
     if (this->rotationCenterMode && this->rotationCenterFound) {
-        this->reorientCamera(viewer->getSoRenderManager()->getCamera(), r, rotationCenter);
+        this->reorientCamera(viewer->getSoRenderManager()->getCamera(), r, rotationCenterD);
     }
     else {
         this->reorientCamera(viewer->getSoRenderManager()->getCamera(), r);
@@ -1552,7 +1600,7 @@ void NavigationStyle::spinSimplifiedInternal(SbVec2f curpos, SbVec2f prevpos, co
         this->reorientCamera(viewer->getSoRenderManager()->getCamera(), r, *center);
     }
     else if (this->rotationCenterMode && this->rotationCenterFound) {
-        this->reorientCamera(viewer->getSoRenderManager()->getCamera(), r, rotationCenter);
+        this->reorientCamera(viewer->getSoRenderManager()->getCamera(), r, rotationCenterD);
     }
     else {
         this->reorientCamera(viewer->getSoRenderManager()->getCamera(), r);
@@ -1641,6 +1689,86 @@ void NavigationStyle::applyOrbitDragCameraConstraints(const OrbitDragState& stat
     camera->farDistance = float(farDistance);
 }
 
+/** Measure the scene's double-precision bounding sphere.
+ *
+ * The near/far update in reorientCamera() needs the real scene extent, which
+ * the float32 Coin actions cannot provide at large absolute coordinates (64 mm
+ * grid at 1e9 mm).  Use the same double path the NaviCube orbit already uses.
+ */
+void NavigationStyle::refreshClipDepth()
+{
+    this->sceneClipCenter = SbVec3d();
+    this->sceneClipRadius = 0.0;
+    if (!this->viewer) {
+        return;
+    }
+
+    Base::BoundBox3d objectBox;
+    if (this->viewer->getObjectBoundBox(objectBox) && objectBox.IsValid()) {
+        const Base::Vector3d center = objectBox.GetCenter();
+        this->sceneClipCenter = SbVec3d(center.x, center.y, center.z);
+        this->sceneClipRadius = 0.5 * (objectBox.GetMaximum() - objectBox.GetMinimum()).Length();
+        return;
+    }
+
+    // Fallback: the float32 sphere.  Useless at large coordinates, but the
+    // caller keeps the frozen planes when the radius is not usable.
+    SbSphere sceneSphere;
+    if (getObjectBoundingSphere(sceneSphere)) {
+        this->sceneClipCenter = SbVec3d(sceneSphere.getCenter());
+        this->sceneClipRadius = double(sceneSphere.getRadius());
+    }
+}
+
+/** Set the camera's near/far planes to the scene bounding sphere, evaluated in
+ * double precision at the current camera depth.
+ *
+ * This mirrors applyOrbitDragCameraConstraints() (which the NaviCube drag uses
+ * per frame) but is driven from the cached sceneClip* members.  It is the
+ * rescue path that Coin's automatic near/far update cannot provide at large
+ * coordinates.
+ */
+void NavigationStyle::applyClipDepth(SoCamera* camera) const
+{
+    if (!camera || this->sceneClipRadius <= 0.0) {
+        return;
+    }
+
+    SbVec3f direction;
+    camera->orientation.getValue().multVec(SbVec3f(0, 0, -1), direction);
+
+    const SbVec3d cameraPosition = camera->position.getValue();
+    const double centerDepth = (this->sceneClipCenter - cameraPosition).dot(SbVec3d(direction));
+
+    const bool isPerspective = camera->isOfType(SoPerspectiveCamera::getClassTypeId());
+    if (isPerspective && centerDepth <= 0.0) {
+        // A perspective camera behind the scene center cannot frame it with a
+        // positive near plane; keep the current planes instead of writing
+        // unusable values.
+        return;
+    }
+
+    // An orthographic camera is repositioned one millimetre in front of the
+    // focal point by reorientCamera(), so the scene extends behind the camera
+    // plane and centerDepth - sceneClipRadius is negative.  A negative near
+    // plane is the normal state for orthographic cameras in FreeCAD (fitToBox
+    // and the fit-margin code in View3DInventorViewer both produce one), and
+    // the orthographic projection renders it correctly; clamping it to zero
+    // here would slice away everything behind the camera plane -- roughly the
+    // near half of the scene.  A perspective near plane must stay strictly
+    // positive, so only that side is floored.
+    double nearDistance = centerDepth - this->sceneClipRadius;
+    if (isPerspective) {
+        nearDistance =
+            std::max(nearDistance, std::max(this->sceneClipRadius * 1.0e-4, 1.0e-5));
+    }
+    const double minClipSpan = std::max(this->sceneClipRadius * 1.0e-3, 1.0e-4);
+    const double farDistance =
+        std::max(centerDepth + this->sceneClipRadius, nearDistance + minClipSpan);
+    camera->nearDistance = float(nearDistance);
+    camera->farDistance = float(farDistance);
+}
+
 SbBool NavigationStyle::doSpin()
 {
     if (this->log.historysize >= 3) {
@@ -1673,15 +1801,61 @@ SbBool NavigationStyle::doSpin()
     return false;
 }
 
+namespace
+{
+// A float32 carries 24 bits of mantissa, so beyond 2^24 mm the float32 grid is
+// wider than a millimetre and a point handed out by Coin's float32 picking has
+// lost more than that from its true position.  Such a point cannot serve as an
+// orbit anchor: the camera is repositioned around it every frame and the model
+// drifts by the same amount.
+inline bool isExactInFloat32(const SbVec3f& point)
+{
+    constexpr float limit = 1.6777216e7F;  // 2^24
+    return std::fabs(point[0]) < limit && std::fabs(point[1]) < limit
+        && std::fabs(point[2]) < limit;
+}
+}  // namespace
+
 void NavigationStyle::saveCursorPosition(const SoEvent* const ev)
 {
     this->globalPos.setValue(QCursor::pos().x(), QCursor::pos().y());
     this->localPos = ev->getPosition();
     rotationCenterIsScenePointAtCursor = false;
 
+    // Re-measure the scene bounds once per drag start.  The scene may have
+    // changed since the last drag (objects added, removed or transformed), and
+    // the per-frame near/far update in reorientCamera() relies on these bounds
+    // being current.
+    refreshClipDepth();
+
     // mode is WindowCenter
     if (!this->rotationCenterMode) {
-        setRotationCenter(viewer->getFocalPoint());
+        setRotationCenter(viewer->getFocalPointD());
+    }
+
+    // The intersection with the focal plane is evaluated relative to the camera
+    // position in double precision, so unlike a float32 scene point it stays
+    // exact at any absolute coordinate.  Evaluate it up front: it doubles as
+    // the fallback anchor when the scene point below is float32-lossy.
+    SbVec3d focalPlanePoint;
+    bool haveFocalPlanePoint = false;
+    if (this->rotationCenterMode
+        & (NavigationStyle::RotationCenterMode::FocalPointAtCursor
+           | NavigationStyle::RotationCenterMode::ScenePointAtCursor)) {
+        const SbViewportRegion& vp = viewer->getSoRenderManager()->getViewportRegion();
+        float ratio = vp.getViewportAspectRatio();
+
+        SoCamera* cam = viewer->getSoRenderManager()->getCamera();
+        if (!cam) {  // no camera
+            return;
+        }
+        SbViewVolume vv = cam->getViewVolume(ratio);
+
+        SbDPLine line;
+        SbVec2f currpos = ev->getNormalizedPosition(vp);
+        vv.projectPointToLine(currpos, line);
+        SbDPPlane panplane = vv.getPlaneDP(cam->focalDistance.getValue());
+        haveFocalPlanePoint = panplane.intersect(line, focalPlanePoint);
     }
 
     // Option to get point on model (slow) or always on focal plane (fast)
@@ -1695,7 +1869,16 @@ void NavigationStyle::saveCursorPosition(const SoEvent* const ev)
 
         SoPickedPoint* picked = rpaction.getPickedPoint();
         if (picked) {
-            setRotationCenter(picked->getPoint());
+            const SbVec3f point = picked->getPoint();
+            // Coin picks in float32 all the way down, so at large coordinates
+            // the scene point is quantized.  Fall back to the exact focal plane
+            // point of the same event, which is still under the cursor.
+            if (isExactInFloat32(point) || !haveFocalPlanePoint) {
+                setRotationCenter(SbVec3d(point));
+            }
+            else {
+                setRotationCenter(focalPlanePoint);
+            }
             rotationCenterIsScenePointAtCursor = true;
             return;
         }
@@ -1703,24 +1886,10 @@ void NavigationStyle::saveCursorPosition(const SoEvent* const ev)
 
     // mode is FocalPointAtCursor or a ScenePointAtCursor failed
     if (this->rotationCenterMode & NavigationStyle::RotationCenterMode::FocalPointAtCursor) {
-        // get the intersection point of the ray and the focal plane
-        const SbViewportRegion& vp = viewer->getSoRenderManager()->getViewportRegion();
-        float ratio = vp.getViewportAspectRatio();
-
-        SoCamera* cam = viewer->getSoRenderManager()->getCamera();
-        if (!cam) {  // no camera
+        if (!haveFocalPlanePoint) {
             return;
         }
-        SbViewVolume vv = cam->getViewVolume(ratio);
-
-        SbDPLine line;
-        SbVec2f currpos = ev->getNormalizedPosition(vp);
-        vv.projectPointToLine(currpos, line);
-        SbVec3d current_planeptd;
-        SbDPPlane panplane = vv.getPlaneDP(cam->focalDistance.getValue());
-        panplane.intersect(line, current_planeptd);
-
-        setRotationCenter(SbVec3f(current_planeptd));
+        setRotationCenter(focalPlanePoint);
     }
 
     // mode is BoundingBoxCenter or a ScenePointAtCursor failed
@@ -1733,12 +1902,21 @@ void NavigationStyle::saveCursorPosition(const SoEvent* const ev)
             return;
         }
 
+        // The float32 bounding sphere center quantizes the same way a picked
+        // point does, so take the anchor from the double precision bounds.
         SbVec3f boundingBoxCenter;
-        if (!getObjectBoundingBoxCenter(boundingBoxCenter)) {
+        Base::BoundBox3d objectBox;
+        if (viewer->getObjectBoundBox(objectBox) && objectBox.IsValid()) {
+            const Base::Vector3d center = objectBox.GetCenter();
+            boundingBoxCenter = SbVec3f(center.x, center.y, center.z);
+            setRotationCenter(SbVec3d(center.x, center.y, center.z));
+        }
+        else if (getObjectBoundingBoxCenter(boundingBoxCenter)) {
+            setRotationCenter(SbVec3d(boundingBoxCenter));
+        }
+        else {
             return;
         }
-
-        setRotationCenter(boundingBoxCenter);
 
         // To drag around the center point of the bbox we have to determine
         // its projection on the screen because this information is used in
@@ -2531,14 +2709,26 @@ SbBool NavigationStyle::processMotionEvent(const SoMotion3Event* const ev)
         static_cast<SoOrthographicCamera*>(camera)->scaleHeight(zoomFactor);
     }
 
-    // Use the active navigation rotation center mode for SpaceMouse rotations
-    SbVec3f motionRotationCenter;
+    // Use the active navigation rotation center mode for SpaceMouse rotations.
+    // Double precision: the same float32 quantization that displaces the
+    // camera by 64 mm every frame at 1e9 mm applies here.
+    SbVec3d motionRotationCenter;
     bool useMotionRotationCenter = false;
     if (this->rotationCenterMode & NavigationStyle::RotationCenterMode::BoundingBoxCenter) {
-        useMotionRotationCenter = getObjectBoundingBoxCenter(motionRotationCenter);
+        Base::BoundBox3d objectBox;
+        if (viewer->getObjectBoundBox(objectBox) && objectBox.IsValid()) {
+            const Base::Vector3d boxCenter = objectBox.GetCenter();
+            motionRotationCenter = SbVec3d(boxCenter.x, boxCenter.y, boxCenter.z);
+            useMotionRotationCenter = true;
+        }
+        else {
+            SbVec3f boundingBoxCenter;
+            useMotionRotationCenter = getObjectBoundingBoxCenter(boundingBoxCenter);
+            motionRotationCenter = SbVec3d(boundingBoxCenter);
+        }
     }
     else if (this->rotationCenterMode && this->rotationCenterFound) {
-        motionRotationCenter = this->rotationCenter;
+        motionRotationCenter = this->rotationCenterD;
         useMotionRotationCenter = true;
     }
 
@@ -2552,16 +2742,21 @@ SbBool NavigationStyle::processMotionEvent(const SoMotion3Event* const ev)
     }
     SbVec3f newPosition, newDirection;
     if (useMotionRotationCenter) {
-        // Reposition the camera so the rotation center stays in the same place
-        SbVec3f rotationCenterDistanceCam;
-        currentRotation.inverse().multVec(
-            SbVec3f(camera->position.getValue() - SbVec3d(motionRotationCenter)),
+        // Reposition the camera so the rotation center stays in the same place.
+        // The difference of two ~1e9 absolute coordinates is a small vector, so
+        // it is exact in double but not in float32 (64 mm grid at 1e9 mm).
+        SbVec3d rotationCenterDistanceCam;
+        toDoubleRotation(currentRotation.inverse()).multVec(
+            camera->position.getValue() - motionRotationCenter,
             rotationCenterDistanceCam
         );
 
-        SbVec3f newRotationCenterDistance;
-        newRotation.multVec(rotationCenterDistanceCam, newRotationCenterDistance);
-        newPosition = motionRotationCenter + newRotationCenterDistance;
+        SbVec3d newRotationCenterDistance;
+        toDoubleRotation(newRotation).multVec(
+            rotationCenterDistanceCam,
+            newRotationCenterDistance
+        );
+        newPosition = SbVec3f(motionRotationCenter + newRotationCenterDistance);
     }
     else {
         newRotation.multVec(SbVec3f(0.0, 0.0, -1.0), newDirection);
@@ -2569,17 +2764,27 @@ SbBool NavigationStyle::processMotionEvent(const SoMotion3Event* const ev)
     }
 
     if (camera->getTypeId().isDerivedFrom(SoPerspectiveCamera::getClassTypeId())) {
-        const SbVec3f zoomPivot = useMotionRotationCenter ? motionRotationCenter : center;
-        newPosition = zoomPivot + (newPosition - zoomPivot) * zoomFactor;
+        const SbVec3d zoomPivot =
+            useMotionRotationCenter ? motionRotationCenter : SbVec3d(center);
+        newPosition = SbVec3f(zoomPivot + (SbVec3d(newPosition) - zoomPivot) * zoomFactor);
         camera->focalDistance.setValue(camera->focalDistance.getValue() * zoomFactor);
     }
 
     newRotation.multVec(dir, dir);
     SbVec3f finalPosition = newPosition + (dir * translationFactor);
 
+    // Keep the near/far range in sync with the double-precision scene bounds:
+    // repositioning/zooming the camera moves every scene point's depth, which
+    // the frozen planes cannot track at large coordinates (see reorientCamera).
+    if (this->sceneClipRadius <= 0.0) {
+        refreshClipDepth();
+    }
     camera->enableNotify(false);
     setCameraOrientationValue(camera, newRotation, OrientationChangeSource::Interactive);
     camera->position = SbVec3d(finalPosition);
+    if (this->sceneClipRadius > 0.0) {
+        applyClipDepth(camera);
+    }
     camera->enableNotify(true);
     camera->touch();
 

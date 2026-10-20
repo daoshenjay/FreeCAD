@@ -5142,14 +5142,25 @@ void View3DInventorViewer::viewBoundBox(const SbBox3d& box)
         animatedViewAll(box, 10, 20);
     }
 
-    cam->viewBoundingBox(box, double(aspectratio), 1.0);
+    cam->viewBoundingBox(box, double(aspectratio), 2.0);
 
-    // viewBoundingBox() leaves near/far tangent to the bounding sphere.  The
-    // float32 camera math can put the geometry about one grid step across a
-    // tangent plane, so push both planes out by two grid steps: fit recomputes
-    // them from scratch each time, so this cannot accumulate, and rotation /
-    // zoom preserve the span.  Near the origin the step is ~1e-7 mm and the
-    // planes stay effectively tangent.
+    // viewBoundingBox() at a slack of 1 leaves near/far tangent to the bounding
+    // sphere, and tangent planes clip rendered geometry: a rotation about the
+    // cursor moves every scene point in depth, and with no room left one of the
+    // two planes cuts into the solid.  A slack of 2 keeps both planes a full
+    // radius away from the sphere, which covers that depth swing for any pivot
+    // inside the model - Camera::fitToBox relies on the same property for the
+    // thumbnails.  Slack only feeds near/far: the camera position, height and
+    // focal distance are derived from the sphere itself, so the framing is
+    // unchanged.
+    //
+    // The float32 grid margin below stays on top of it because it also covers
+    // the quantization of the eye-space coordinates, which a slack expressed in
+    // model units does not.  The float32 camera math can put the geometry about
+    // one grid step across a plane, so push both planes out by two grid steps:
+    // fit recomputes them from scratch each time, so this cannot accumulate,
+    // and rotation / zoom preserve the span.  Near the origin the step is ~1e-7
+    // mm and the planes stay effectively where the slack put them.
     if (ulp > 0.0) {
         const float margin = static_cast<float>(2.0 * ulp);
         float nearv = cam->nearDistance.getValue();

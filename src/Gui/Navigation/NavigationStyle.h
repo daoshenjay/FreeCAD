@@ -224,6 +224,7 @@ public:
     void zoomOut();
     void setRotationCenterMode(RotationCenterModes);
     RotationCenterModes getRotationCenterMode() const;
+    void setRotationCenter(const SbVec3d& cnt);
     void setRotationCenter(const SbVec3f& cnt);
 
     SoCamera* getCamera() const;
@@ -372,6 +373,8 @@ private:
     bool getObjectBoundingSphere(SbSphere& sphere) const;
     bool getObjectBoundingBoxCenter(SbVec3f& center) const;
     void applyOrbitDragCameraConstraints(const OrbitDragState& state);
+    void refreshClipDepth();
+    void applyClipDepth(SoCamera* camera) const;
     bool isDoubleClickCandidate(const SoMouseButtonEvent* event) const;
     void deferMouseDownEvent(const SoMouseButtonEvent* event);
     void clearDeferredMouseDownEvent();
@@ -462,10 +465,25 @@ private:
     friend class NavigationAnimator;
 
     SbVec3f rotationCenter;
+    // Double precision copy of rotationCenter.  The orbit anchor is used as an
+    // absolute world position, and at large coordinates (1e9 mm and beyond) the
+    // float32 grid is tens of millimetres wide, so a float32 anchor displaces
+    // the camera by that much every frame and the model drifts out of the view.
+    // The float member stays for the screen space consumers of the anchor.
+    SbVec3d rotationCenterD;
     SbBool rotationCenterFound;
     SbBool rotationCenterIsScenePointAtCursor;
     NavigationStyle::RotationCenterModes rotationCenterMode;
     std::optional<OrbitDragState> orbitDrag;
+    // Double-precision scene bounding sphere, measured from the tight object
+    // bounds.  It is refreshed once per orbit drag (and lazily on the first
+    // interactive rotation) and drives the per-frame near/far update in
+    // reorientCamera().  Coin's automatic near/far update cannot do this at
+    // large absolute coordinates: it measures the scene with a float32
+    // bounding box, which collapses there, so it keeps the camera's frozen
+    // planes while the model swings out of that range.
+    SbVec3d sceneClipCenter;
+    double sceneClipRadius = 0.0;
     float sensitivity;
     SbBool resetcursorpos;
 
