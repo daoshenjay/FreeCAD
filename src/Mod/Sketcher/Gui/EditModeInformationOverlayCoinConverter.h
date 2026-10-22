@@ -26,6 +26,8 @@
 
 #include <vector>
 
+#include <Base/Vector3D.h>
+
 #include "ViewProviderSketch.h"
 
 
@@ -170,6 +172,15 @@ public:
      */
     void convert(const Part::Geometry* geometry, int geoid);
 
+    /** Sets the local reference the overlay coordinates are stored relative to.
+     *
+     *  Coin stores the coordinates as float32. Far from the sketch origin the
+     *  absolute values are quantized and the whole overlay disappears. The
+     *  coordinates are written relative to this reference; the matching
+     *  translation is applied by the scene graph node.
+     */
+    void setReferenceOffset(const Base::Vector3d& offset);
+
 private:
     template<CalculationType calculation>
     void calculate(const Part::Geometry* geometry, [[maybe_unused]] int geoid);
@@ -204,6 +215,9 @@ private:
     SoGroup* infoGroup;
     OverlayParameters& overlayParameters;
     DrawingParameters& drawingParameters;
+
+    // Local reference the overlay coordinates are stored relative to.
+    Base::Vector3d referenceOffset;
 
     // Calculations
     NodeText<CalculationType::BSplineDegree> degree;

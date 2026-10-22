@@ -24,12 +24,14 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <optional>
 #include <vector>
 
 #include <App/Application.h>
+#include <Base/Tools2D.h>
 #include <Base/Vector3D.h>
 #include <Mod/Sketcher/App/GeoList.h>
 #include "GeometryCreationMode.h"
@@ -76,6 +78,40 @@ class EditModeGeometryCoinManager;
 
 using GeoList = Sketcher::GeoList;
 using GeoListFacade = Sketcher::GeoListFacade;
+
+/** Rounds \a value to the nearest float32 value and returns it as a double.
+ *
+ *  Coin stores the geometry anchors in float32 fields. An anchor that is not
+ *  exactly representable in float32 shifts the rendered geometry by the
+ *  rounding error, because the vertex offsets are subtracted from the exact
+ *  double anchor and added back through a float32 transformation. Keeping the
+ *  anchor on the float32 lattice makes that round trip exact again.
+ */
+inline double snapToFloat32(double value)
+{
+    return static_cast<double>(static_cast<float>(value));
+}
+
+/** Reference point used by the camera-following edit layers.
+ *
+ *  Snaps to the float32 lattice, and keeps the original absolute coordinate
+ *  behaviour at ordinary coordinates, where float32 is accurate enough.
+ */
+inline Base::Vector2d effectiveCameraReference(double x, double y)
+{
+    Base::Vector2d reference(snapToFloat32(x), snapToFloat32(y));
+    constexpr double largeCoordinateThreshold = 1.0e5;
+    if (std::abs(reference.x) < largeCoordinateThreshold
+        && std::abs(reference.y) < largeCoordinateThreshold) {
+        return Base::Vector2d(0.0, 0.0);
+    }
+    return reference;
+}
+
+inline Base::Vector2d effectiveCameraReference(const Base::Vector2d& reference)
+{
+    return effectiveCameraReference(reference.x, reference.y);
+}
 
 /** @brief      Helper class for managing the Coin nodes of ViewProviderSketch.
  *  @details
@@ -326,6 +362,17 @@ public:
     // Updates the Axes extension to span the specified area.
     void updateAxesLength(const Base::BoundBox2d& bb);
 
+    /** Updates the camera-following local reference used to keep Coin's float32
+     *  vertices precise for geometry far away from the sketch origin.
+     *
+     *  Sets the reference for the temporary edit layers and rewrites the committed
+     *  geometry layer (coordinates + scene transform) in the same step so both stay
+     *  consistent with each other.
+     */
+    void updateCameraReference(const Base::Vector2d& reference);
+
+    const Base::Vector2d& getCameraReference() const;
+
     void updateElementSizeParameters();
 
 private:
@@ -406,6 +453,11 @@ private:
 
     /// Mapping between external and internal indices
     CoinMapping coinMapping;
+
+    // Camera-following local reference (sketch coordinates). Temporary edit curves,
+    // markers and hint lines are written relative to it; it is only ever changed
+    // together with those coordinate nodes being rewritten.
+    Base::Vector2d cameraReference {0.0, 0.0};
 
     // Coin Helpers
     std::unique_ptr<EditModeConstraintCoinManager> pEditModeConstraintCoinManager;

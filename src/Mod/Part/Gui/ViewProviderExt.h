@@ -30,6 +30,7 @@
 #include <map>
 
 #include <App/PropertyUnits.h>
+#include <Base/Vector3D.h>
 #include <Gui/ViewProviderGeometryObject.h>
 #include <Gui/ViewProviderTextureExtension.h>
 
@@ -58,6 +59,7 @@ class SoNormal;
 class SoNormalBinding;
 class SoMaterialBinding;
 class SoIndexedLineSet;
+class SoTranslation;
 
 namespace PartGui
 {
@@ -191,7 +193,8 @@ public:
         double deviation,
         double angularDeflection,
         bool normalsFromUV = false,
-        SoTransform* offsetNode = nullptr
+        SoTransform* offsetNode = nullptr,
+        const Base::Vector3d& offset = Base::Vector3d()
     );
 
     static void setupCoinGeometry(
@@ -199,8 +202,14 @@ public:
         SoFCShape* node,
         double deviation,
         double angularDeflection,
-        bool normalsFromUV = false
+        bool normalsFromUV = false,
+        const Base::Vector3d& offset = Base::Vector3d()
     );
+
+    /// Sets the local reference the rendered vertices are stored relative to, so Coin's
+    /// float32 coordinates stay precise when a shape sits far from the origin. The offset is
+    /// re-applied by a translation node in the scene graph, keeping the rendered result unchanged.
+    void setCoinReferenceOffset(const Base::Vector3d& offset);
 
 protected:
     bool setEdit(int ModNum) override;
@@ -279,6 +288,11 @@ protected:
     bool VisualTouched;
     bool NormalsFromUV;
     bool faceHighlightActive = false;
+
+    /// local reference the stored vertices are relative to (see setCoinReferenceOffset)
+    Base::Vector3d coinReferenceOffset {0.0, 0.0, 0.0};
+    /// re-applies coinReferenceOffset after the vertices were shifted by it; nullptr until attach()
+    SoTranslation* pcShapeRefTransform = nullptr;
 
 private:
     Gui::ViewProviderFaceTexture texture;

@@ -182,6 +182,9 @@ public:
     void setSketchGui(ViewProviderSketch* vp);
     void deactivate() override;
 
+    /// returns the camera-following local reference used by the edit layers.
+    Base::Vector3d getCameraReference() const;
+
     virtual void mouseMove(SnapManager::SnapHandle snapHandle) = 0;
     virtual bool pressButton(Base::Vector2d pos) = 0;
     virtual bool releaseButton(Base::Vector2d pos) = 0;

@@ -26,6 +26,8 @@
 
 #include <vector>
 
+#include <Base/Vector3D.h>
+
 #include "ViewProviderSketch.h"
 
 
@@ -126,6 +128,13 @@ public:
     void convert(const Sketcher::GeoListFacade& geolistfacade);
 
     /**
+     * sets the local reference point relative to which the vertices are written
+     * into Coin (which stores coordinates as float32). The scene applies the
+     * matching SoTranslation so the rendered result is unchanged.
+     */
+    void setReferenceOffset(const Base::Vector3d& reference);
+
+    /**
      * returns the maximum of the vertical and horizontal magnitudes of the
      * coordinates of the points and lines added to coin by this layer (local responsibility).
      */
@@ -180,6 +189,10 @@ private:
 
     // temporal global vertex counter
     int vertexCounter = 0;
+
+    // Local reference point (sketch coordinates) subtracted from every vertex
+    // written into Coin to preserve float32 precision far from the origin.
+    Base::Vector3d referenceOffset {0.0, 0.0, 0.0};
 
     // Parameters
     DrawingParameters& drawingParameters;

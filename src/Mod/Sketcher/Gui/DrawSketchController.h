@@ -670,6 +670,11 @@ protected:
                                  )
                                  .get();
 
+            // The label points are stored as float32 by Coin. Keep them relative to
+            // the camera-following edit reference so labels stay precise far from
+            // the sketch origin.
+            parameter->setReferenceProvider([this]() { return handler->getCameraReference(); });
+
             const auto handleParameterValueChanged = [this, parameter, i](double value) {
                 parameter->setActivatedColor();
                 onViewValueChanged(i, value);

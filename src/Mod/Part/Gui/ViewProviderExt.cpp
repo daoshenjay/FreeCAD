@@ -69,6 +69,7 @@
 #include <Inventor/nodes/SoPolygonOffset.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoShapeHints.h>
+#include <Inventor/nodes/SoTranslation.h>
 
 #include <boost/algorithm/string/predicate.hpp>
 
@@ -611,6 +612,22 @@ void ViewProviderPartExt::attach(App::DocumentObject* pcFeat)
         visualCoordOffset->ref();
         visualCoordOffset->setName("VisualCoordOffset");
         pcRoot->insertChild(visualCoordOffset, pcRoot->findChild(pcModeSwitch));
+    }
+    else {
+        // View providers that opt out of the automatic shape-derived offset (2D
+        // objects, sketches) manage it themselves through setCoinReferenceOffset().
+        // Placed as first child of each leaf so it covers faces, edges and points of
+        // every display mode without touching the grid/edit nodes appended to pcRoot.
+        pcShapeRefTransform = new SoTranslation();
+        pcShapeRefTransform->setName("ShapeRefTransform");
+        pcShapeRefTransform->translation.setValue(
+            static_cast<float>(coinReferenceOffset.x),
+            static_cast<float>(coinReferenceOffset.y),
+            static_cast<float>(coinReferenceOffset.z)
+        );
+        pcFlatRoot->insertChild(pcShapeRefTransform, 0);
+        wireframe->insertChild(pcShapeRefTransform, 0);
+        pcPointsRoot->insertChild(pcShapeRefTransform, 0);
     }
 
     // putting all together with the switch
@@ -1199,7 +1216,8 @@ void ViewProviderPartExt::setupCoinGeometry(
     double deviation,
     double angularDeflection,
     bool normalsFromUV,
-    SoTransform* offsetNode
+    SoTransform* offsetNode,
+    const Base::Vector3d& offset
 )
 {
     if (Part::Tools::isShapeEmpty(shape)) {
@@ -1268,9 +1286,13 @@ void ViewProviderPartExt::setupCoinGeometry(
     // small while the world position stays exact (up to the float32 ULP of
     // the reference point itself, like for large placements). Without an
     // offset node (other callers of this function) the vertices must stay
-    // in their original coordinate system.
+    // in their original coordinate system. An explicit offset (used by view
+    // providers that opt out of the automatic offset) takes precedence.
+    const bool hasExplicitOffset =
+        (offset.x != 0.0 || offset.y != 0.0 || offset.z != 0.0);
     const Base::Vector3d coordOffset =
-        offsetNode ? computeVisualCoordOffset(shape) : Base::Vector3d();
+        hasExplicitOffset ? offset
+                          : (offsetNode ? computeVisualCoordOffset(shape) : Base::Vector3d());
     if (offsetNode) {
         offsetNode->translation.setValue(
             static_cast<float>(coordOffset.x),
@@ -1675,7 +1697,8 @@ void ViewProviderPartExt::setupCoinGeometry(
     SoFCShape* node,
     double deviation,
     double angularDeflection,
-    bool normalsFromUV
+    bool normalsFromUV,
+    const Base::Vector3d& offset
 )
 {
     setupCoinGeometry(
@@ -1687,8 +1710,27 @@ void ViewProviderPartExt::setupCoinGeometry(
         node->nodeset,
         deviation,
         angularDeflection,
-        normalsFromUV
+        normalsFromUV,
+        nullptr,
+        offset
     );
+}
+
+void ViewProviderPartExt::setCoinReferenceOffset(const Base::Vector3d& offset)
+{
+    coinReferenceOffset = offset;
+    if (pcShapeRefTransform) {
+        pcShapeRefTransform->translation.setValue(
+            static_cast<float>(offset.x),
+            static_cast<float>(offset.y),
+            static_cast<float>(offset.z)
+        );
+    }
+
+    // The vertices are stored relative to a different reference now, so they must be
+    // re-computed even when the shape itself did not change.
+    VisualTouched = true;
+    updateVisual();
 }
 
 void ViewProviderPartExt::updateVisual()
@@ -1734,7 +1776,8 @@ void ViewProviderPartExt::updateVisual()
             Deviation.getValue(),
             AngularDeflection.getValue(),
             NormalsFromUV,
-            visualCoordOffset
+            visualCoordOffset,
+            coinReferenceOffset
         );
 
         lastRenderedShape = shape;

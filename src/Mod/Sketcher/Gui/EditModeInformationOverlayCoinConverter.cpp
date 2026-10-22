@@ -59,6 +59,11 @@ EditModeInformationOverlayCoinConverter::EditModeInformationOverlayCoinConverter
 
     };
 
+void EditModeInformationOverlayCoinConverter::setReferenceOffset(const Base::Vector3d& offset)
+{
+    referenceOffset = offset;
+}
+
 void EditModeInformationOverlayCoinConverter::convert(const Part::Geometry* geometry, int geoid)
 {
     if (geoid >= 0) {
@@ -374,8 +379,8 @@ void EditModeInformationOverlayCoinConverter::setPolygon(
 
     for (size_t i = 0; i < result.coordinates.size(); i++) {
         vts[i].setValue(
-            result.coordinates[i].x,
-            result.coordinates[i].y,
+            static_cast<float>(result.coordinates[i].x - referenceOffset.x),
+            static_cast<float>(result.coordinates[i].y - referenceOffset.y),
             ViewProviderSketchCoinAttorney::getViewOrientationFactor(viewProvider)
                 * drawingParameters.zInfo
         );
@@ -448,8 +453,8 @@ void EditModeInformationOverlayCoinConverter::addNode(const Result& result)
             SoTranslation* translate = new SoTranslation;
 
             translate->translation.setValue(
-                result.positions[i].x,
-                result.positions[i].y,
+                static_cast<float>(result.positions[i].x - referenceOffset.x),
+                static_cast<float>(result.positions[i].y - referenceOffset.y),
                 ViewProviderSketchCoinAttorney::getViewOrientationFactor(viewProvider)
                     * drawingParameters.zInfo
             );
@@ -539,8 +544,8 @@ void EditModeInformationOverlayCoinConverter::updateNode(const Result& result)
                 sep->getChild(static_cast<int>(TextNodePosition::TextCoordinates))
             )
                 ->translation.setValue(
-                    result.positions[i].x,
-                    result.positions[i].y,
+                    static_cast<float>(result.positions[i].x - referenceOffset.x),
+                    static_cast<float>(result.positions[i].y - referenceOffset.y),
                     ViewProviderSketchCoinAttorney::getViewOrientationFactor(viewProvider)
                         * drawingParameters.zInfo
                 );

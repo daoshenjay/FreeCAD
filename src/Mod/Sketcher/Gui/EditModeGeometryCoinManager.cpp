@@ -116,6 +116,17 @@ void EditModeGeometryCoinManager::processGeometry(const GeoListFacade& geolistfa
         coinMapping
     );
 
+    // Rewrite the stored float coordinates relative to the local reference point and
+    // move the layer back with the matching transform in the same step.
+    gcconv.setReferenceOffset(referenceOffset);
+    editModeScenegraphNodes.GeometryLayerReferenceTransform->translation.setValue(
+        SbVec3f(
+            static_cast<float>(referenceOffset.x),
+            static_cast<float>(referenceOffset.y),
+            static_cast<float>(referenceOffset.z)
+        )
+    );
+
     gcconv.convert(geolistfacade);
 
     // set cross coordinates
@@ -128,6 +139,16 @@ void EditModeGeometryCoinManager::processGeometry(const GeoListFacade& geolistfa
     );
     analysisResults.bsplineGeoIds = gcconv.getBSplineGeoIds();
     analysisResults.arcGeoIds = gcconv.getArcGeoIds();
+}
+
+void EditModeGeometryCoinManager::setReferenceOffset(const Base::Vector3d& reference)
+{
+    referenceOffset = reference;
+}
+
+const Base::Vector3d& EditModeGeometryCoinManager::getReferenceOffset() const
+{
+    return referenceOffset;
 }
 
 void EditModeGeometryCoinManager::updateGeometryColor(
@@ -649,13 +670,29 @@ void EditModeGeometryCoinManager::createEditModeInventorNodes()
 
 void EditModeGeometryCoinManager::createGeometryRootNodes()
 {
-    // stuff for the points ++++++++++++++++++++++++++++++++++++++
+    // The points and curves are stored relative to a local reference point so that
+    // Coin's float32 vertices keep enough precision for geometry far away from the
+    // sketch origin. The reference transform shifts the whole layer back.
+    SoSeparator* geometryLayerRoot = new SoSeparator;
+    geometryLayerRoot->setName("GeometryLayerRoot");
+    editModeScenegraphNodes.EditRoot->addChild(geometryLayerRoot);
+
+    editModeScenegraphNodes.GeometryLayerReferenceTransform = new SoTranslation;
+    editModeScenegraphNodes.GeometryLayerReferenceTransform->setName(
+        "GeometryLayerReferenceTransform"
+    );
+    editModeScenegraphNodes.GeometryLayerReferenceTransform->translation.setValue(
+        SbVec3f(0.0f, 0.0f, 0.0f)
+    );
+    geometryLayerRoot->addChild(editModeScenegraphNodes.GeometryLayerReferenceTransform);
+
+    // stuff for the points +++++++++++++++++++++++++++++++++++++++
     editModeScenegraphNodes.PointsGroup = new SmSwitchboard;
-    editModeScenegraphNodes.EditRoot->addChild(editModeScenegraphNodes.PointsGroup);
+    geometryLayerRoot->addChild(editModeScenegraphNodes.PointsGroup);
 
     // stuff for the Curves +++++++++++++++++++++++++++++++++++++++
     editModeScenegraphNodes.CurvesGroup = new SmSwitchboard;
-    editModeScenegraphNodes.EditRoot->addChild(editModeScenegraphNodes.CurvesGroup);
+    geometryLayerRoot->addChild(editModeScenegraphNodes.CurvesGroup);
 }
 
 void EditModeGeometryCoinManager::emptyGeometryRootNodes()

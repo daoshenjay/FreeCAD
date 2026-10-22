@@ -97,6 +97,29 @@ EditModeConstraintCoinManager::EditModeConstraintCoinManager(
 
 EditModeConstraintCoinManager::~EditModeConstraintCoinManager() = default;
 
+void EditModeConstraintCoinManager::setReferenceOffset(const Base::Vector3d& offset)
+{
+    referenceOffset = offset;
+}
+
+SbVec3f EditModeConstraintCoinManager::toReference(double x, double y, float z) const
+{
+    return SbVec3f(
+        static_cast<float>(x - referenceOffset.x),
+        static_cast<float>(y - referenceOffset.y),
+        z
+    );
+}
+
+Base::Vector3d EditModeConstraintCoinManager::toAbsolute(const SbVec3f& p) const
+{
+    return Base::Vector3d(
+        static_cast<double>(p[0]) + referenceOffset.x,
+        static_cast<double>(p[1]) + referenceOffset.y,
+        static_cast<double>(p[2])
+    );
+}
+
 void EditModeConstraintCoinManager::updateVirtualSpace()
 {
     const std::vector<Sketcher::Constraint*>& constrlist
@@ -356,7 +379,7 @@ Restart:
                             static_cast<int>(ConstraintNodePosition::FirstTranslationIndex)
                         ));
 
-                        translation->abPos = SbVec3f(midpos.x, midpos.y, zConstrH);  // Absolute
+                        translation->abPos = toReference(midpos.x, midpos.y, zConstrH);  // Absolute
                                                                                      // Reference
 
                         // Reference Position that is scaled according to zoom
@@ -386,7 +409,7 @@ Restart:
                             static_cast<int>(ConstraintNodePosition::FirstTranslationIndex)
                         ));
 
-                        translation->abPos = SbVec3f(midpos1.x, midpos1.y, zConstrH);
+                        translation->abPos = toReference(midpos1.x, midpos1.y, zConstrH);
                         translation->translation = SbVec3f(relpos1.x, relpos1.y, 0);
 
                         Base::Vector3d relpos2 = seekConstraintPosition(norm2, 4.0);
@@ -510,7 +533,7 @@ Restart:
                         sep->getChild(static_cast<int>(ConstraintNodePosition::FirstTranslationIndex))
                     );
 
-                    translation->abPos = SbVec3f(midpos1.x, midpos1.y, zConstrH);
+                    translation->abPos = toReference(midpos1.x, midpos1.y, zConstrH);
                     translation->translation = SbVec3f(relpos1.x, relpos1.y, 0);
 
                     if (twoIcons) {
@@ -744,7 +767,7 @@ Restart:
                         sep->getChild(static_cast<int>(ConstraintNodePosition::FirstTranslationIndex))
                     );
 
-                    translation->abPos = SbVec3f(midpos1.x, midpos1.y, zConstrH);  // Absolute Reference
+                    translation->abPos = toReference(midpos1.x, midpos1.y, zConstrH);  // Absolute Reference
 
                     // Reference Position that is scaled according to zoom
                     translation->translation = SbVec3f(relpos1.x, relpos1.y, 0);
@@ -825,10 +848,10 @@ Restart:
                     );
 
                     // 4. Define the 4 corners of the rectangle using the inflated points
-                    SbVec3f p0(min_pnt.X(), min_pnt.Y(), zConstrH);  // bottom-left
-                    SbVec3f p1(max_pnt.X(), min_pnt.Y(), zConstrH);  // bottom-right
-                    SbVec3f p2(max_pnt.X(), max_pnt.Y(), zConstrH);  // top-right
-                    SbVec3f p3(min_pnt.X(), max_pnt.Y(), zConstrH);  // top-left
+                    SbVec3f p0 = toReference(min_pnt.X(), min_pnt.Y(), zConstrH);  // bottom-left
+                    SbVec3f p1 = toReference(max_pnt.X(), min_pnt.Y(), zConstrH);  // bottom-right
+                    SbVec3f p2 = toReference(max_pnt.X(), max_pnt.Y(), zConstrH);  // top-right
+                    SbVec3f p3 = toReference(min_pnt.X(), max_pnt.Y(), zConstrH);  // top-left
 
                     // 3. Get the SoCoordinate3 node we created in rebuildConstraintNodes
                     //    Index 0: SoMaterial, Index 1: SoDrawStyle, Index 2: SoCoordinate3
@@ -979,9 +1002,9 @@ Restart:
 
                             asciiText->pnts.setNum(3);
                             SbVec3f* verts = asciiText->pnts.startEditing();
-                            verts[0] = SbVec3f(center1.x, center1.y, center1.z);
-                            verts[1] = SbVec3f(pnt1.x, pnt1.y, pnt1.z);
-                            verts[2] = SbVec3f(pnt2.x, pnt2.y, pnt2.z);
+                            verts[0] = toReference(center1.x, center1.y, center1.z);
+                            verts[1] = toReference(pnt1.x, pnt1.y, pnt1.z);
+                            verts[2] = toReference(pnt2.x, pnt2.y, pnt2.z);
                             asciiText->pnts.finishEditing();
                             break;
                         }
@@ -999,8 +1022,8 @@ Restart:
                     asciiText->extensionLines.setNum(hasLineHelper ? 2 : 0);
                     if (hasLineHelper) {
                         SbVec3f* extensionVerts = asciiText->extensionLines.startEditing();
-                        extensionVerts[0] = SbVec3f(lineHelperStart.x, lineHelperStart.y, zConstrH);
-                        extensionVerts[1] = SbVec3f(lineHelperEnd.x, lineHelperEnd.y, zConstrH);
+                        extensionVerts[0] = toReference(lineHelperStart.x, lineHelperStart.y, zConstrH);
+                        extensionVerts[1] = toReference(lineHelperEnd.x, lineHelperEnd.y, zConstrH);
                         asciiText->extensionLines.finishEditing();
                     }
 
@@ -1071,24 +1094,24 @@ Restart:
                     asciiText->pnts.setNum(numPoints);
                     SbVec3f* verts = asciiText->pnts.startEditing();
 
-                    verts[0] = SbVec3f(pnt1.x, pnt1.y, zConstrH);
-                    verts[1] = SbVec3f(pnt2.x, pnt2.y, zConstrH);
+                    verts[0] = toReference(pnt1.x, pnt1.y, zConstrH);
+                    verts[1] = toReference(pnt2.x, pnt2.y, zConstrH);
 
                     if (numPoints > 2) {
                         if (helperRange1 != 0.) {
-                            verts[2] = SbVec3f(center1.x, center1.y, zConstrH);
+                            verts[2] = toReference(center1.x, center1.y, zConstrH);
                             asciiText->param3 = helperStartAngle1;
                             asciiText->param4 = helperRange1;
                             asciiText->param5 = radius1;
                         }
                         else {
-                            verts[2] = SbVec3f(center2.x, center2.y, zConstrH);
+                            verts[2] = toReference(center2.x, center2.y, zConstrH);
                             asciiText->param3 = helperStartAngle2;
                             asciiText->param4 = helperRange2;
                             asciiText->param5 = radius2;
                         }
                         if (numPoints > 3) {
-                            verts[3] = SbVec3f(center2.x, center2.y, zConstrH);
+                            verts[3] = toReference(center2.x, center2.y, zConstrH);
                             asciiText->param6 = helperStartAngle2;
                             asciiText->param7 = helperRange2;
                             asciiText->param8 = radius2;
@@ -1167,7 +1190,7 @@ Restart:
                             static_cast<int>(ConstraintNodePosition::FirstTranslationIndex)
                         ));
 
-                        translation->abPos = SbVec3f(pos.x, pos.y, zConstrH);  // Absolute Reference
+                        translation->abPos = toReference(pos.x, pos.y, zConstrH);  // Absolute Reference
                         translation->translation = SbVec3f(relPos.x, relPos.y, 0);
                     }
                     else if (Constr->Type == Tangent) {
@@ -1197,7 +1220,7 @@ Restart:
                                 static_cast<int>(ConstraintNodePosition::FirstTranslationIndex)
                             ));
 
-                            translation->abPos = SbVec3f(midpos1.x, midpos1.y, zConstrH);  // Absolute
+                            translation->abPos = toReference(midpos1.x, midpos1.y, zConstrH);  // Absolute
                                                                                            // Reference
                             translation->translation = SbVec3f(relpos1.x, relpos1.y, 0);
 
@@ -1299,7 +1322,7 @@ Restart:
                             static_cast<int>(ConstraintNodePosition::FirstTranslationIndex)
                         ));
 
-                        translation->abPos = SbVec3f(pos.x, pos.y, zConstrH);  // Absolute Reference
+                        translation->abPos = toReference(pos.x, pos.y, zConstrH);  // Absolute Reference
                         translation->translation = SbVec3f(relPos.x, relPos.y, 0);
                     }
                 } break;
@@ -1310,8 +1333,8 @@ Restart:
                     Base::Vector3d pnt1 = geolistfacade.getPoint(Constr->First, Constr->FirstPos);
                     Base::Vector3d pnt2 = geolistfacade.getPoint(Constr->Second, Constr->SecondPos);
 
-                    SbVec3f p1(pnt1.x, pnt1.y, zConstrH);
-                    SbVec3f p2(pnt2.x, pnt2.y, zConstrH);
+                    SbVec3f p1 = toReference(pnt1.x, pnt1.y, zConstrH);
+                    SbVec3f p2 = toReference(pnt2.x, pnt2.y, zConstrH);
                     SbVec3f dir = (p2 - p1);
                     dir.normalize();
                     SbVec3f norm(-dir[1], dir[0], 0);
@@ -1429,7 +1452,7 @@ Restart:
                         }
                         else {  // angle-via-point
                             Base::Vector3d p = geolistfacade.getPoint(Constr->Third, Constr->ThirdPos);
-                            p0 = SbVec3f(p.x, p.y, 0);
+                            p0 = toReference(p.x, p.y, 0);
                             dir1 = getNormal(geolistfacade, Constr->First, p);
                             // TODO: Check
                             // dir1 = getSolvedSketch().calculateNormalAtPoint(Constr->First,
@@ -1553,8 +1576,8 @@ Restart:
                         break;
                     }
 
-                    SbVec3f p1(pnt1.x, pnt1.y, zConstrH);
-                    SbVec3f p2(pnt2.x, pnt2.y, zConstrH);
+                    SbVec3f p1 = toReference(pnt1.x, pnt1.y, zConstrH);
+                    SbVec3f p2 = toReference(pnt2.x, pnt2.y, zConstrH);
 
                     auto* asciiText = static_cast<SoDatumLabel*>(
                         sep->getChild(static_cast<int>(ConstraintNodePosition::DatumLabelIndex))
@@ -1630,8 +1653,8 @@ Restart:
                         break;
                     }
 
-                    SbVec3f p1(pnt1.x, pnt1.y, zConstrH);
-                    SbVec3f p2(pnt2.x, pnt2.y, zConstrH);
+                    SbVec3f p1 = toReference(pnt1.x, pnt1.y, zConstrH);
+                    SbVec3f p2 = toReference(pnt2.x, pnt2.y, zConstrH);
 
                     auto* asciiText = static_cast<SoDatumLabel*>(
                         sep->getChild(static_cast<int>(ConstraintNodePosition::DatumLabelIndex))
@@ -2362,11 +2385,16 @@ bool EditModeConstraintCoinManager::resolveIconScreenGeometry(
         }
     }
 
-    SbVec3f iconWorldPos = absPos + scaleFactor * trans;
+    Base::Vector3d iconWorldPos = toAbsolute(absPos);
+    iconWorldPos += Base::Vector3d(
+        static_cast<double>(trans[0]) * scaleFactor,
+        static_cast<double>(trans[1]) * scaleFactor,
+        static_cast<double>(trans[2]) * scaleFactor
+    );
     iconScreenCenter = ViewProviderSketchCoinAttorney::getScreenCoordinates(viewProvider, iconWorldPos);
 
     if (pickedPoint) {
-        *pickedPoint = Base::convertTo<Base::Vector3d>(iconWorldPos);
+        *pickedPoint = iconWorldPos;
     }
 
     return true;
@@ -3119,6 +3147,17 @@ void EditModeConstraintCoinManager::createEditModeInventorNodes()
 
     editModeScenegraphNodes.constrGroup = new SmSwitchboard();
     editModeScenegraphNodes.constrGroup->setName("ConstraintGroup");
+
+    editModeScenegraphNodes.ConstraintReferenceTransform = new SoTranslation();
+    editModeScenegraphNodes.ConstraintReferenceTransform->setName("ConstraintReferenceTransform");
+    editModeScenegraphNodes.ConstraintReferenceTransform->translation.setValue(
+        SbVec3f(
+            static_cast<float>(referenceOffset.x),
+            static_cast<float>(referenceOffset.y),
+            0.0f
+        )
+    );
+    constrAnnotation->addChild(editModeScenegraphNodes.ConstraintReferenceTransform);
     constrAnnotation->addChild(editModeScenegraphNodes.constrGroup);
 
     editModeScenegraphNodes.EditRoot->addChild(constrAnnotation);

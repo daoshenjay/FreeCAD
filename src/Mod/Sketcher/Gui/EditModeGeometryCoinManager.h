@@ -27,6 +27,7 @@
 #include <functional>
 #include <vector>
 
+#include <Base/Vector3D.h>
 #include <Mod/Sketcher/App/GeoList.h>
 
 #include "EditModeCoinManagerParameters.h"
@@ -101,6 +102,16 @@ public:
     // This function populates the coin nodes with the information of the current geometry
     void processGeometry(const GeoListFacade& geolistfacade);
 
+    /** Sets the local reference point of the geometry layer.
+     *
+     *  Must only be called together with a subsequent processGeometry() call, because
+     *  the stored float coordinates and the scene SoTranslation have to be rewritten
+     *  in the same step to stay consistent.
+     */
+    void setReferenceOffset(const Base::Vector3d& reference);
+
+    const Base::Vector3d& getReferenceOffset() const;
+
     void updateGeometryColor(const GeoListFacade& geolistfacade, bool issketchinvalid);
 
     void updateGeometryLayersConfiguration();
@@ -125,6 +136,10 @@ private:
     EditModeScenegraphNodes& editModeScenegraphNodes;
 
     CoinMapping& coinMapping;
+
+    // Local reference point (sketch coordinates) the geometry layer vertices are
+    // stored relative to. Updated together with processGeometry().
+    Base::Vector3d referenceOffset {0.0, 0.0, 0.0};
 };
 
 

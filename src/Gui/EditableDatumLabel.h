@@ -28,12 +28,17 @@
 #include <QLabel>
 #include <Gui/QuantitySpinBox.h>
 
+#include <functional>
+
+#include <Base/Vector3D.h>
+
 #include "SoDatumLabel.h"
 
 #include <FCGlobal.h>
 
 class SoNodeSensor;
 class SoTransform;
+class SoTranslation;
 class SoAnnotation;
 class SoSwitch;
 class SoEventCallback;
@@ -83,6 +88,18 @@ public:
     void setFocus();
     void setPoints(SbVec3f p1, SbVec3f p2);
     void setPoints(Base::Vector3d p1, Base::Vector3d p2);
+
+    /** Sets the local reference the points are stored relative to.
+     *
+     *  Coin stores the label coordinates as float32. For sketches far away from the
+     *  origin the absolute coordinates are quantized and the label is placed outside
+     *  the view. The reference is re-added by a translation node, so the rendered
+     *  result is unchanged.
+     */
+    void setReferenceOffset(const Base::Vector3d& offset);
+
+    /** Provides a callback used to refresh the reference when the camera changes. */
+    void setReferenceProvider(std::function<Base::Vector3d()> provider);
     void setFocusToSpinbox();
     void clearSelection();  ///< Clears text selection in the spinbox
     void setLabelType(SoDatumLabel::Type type, Function function = Function::Positioning);
@@ -131,7 +148,8 @@ private:
     void handleSpinBoxValueChanged();
     void handleSpinBoxInputCleared();
     void positionSpinbox();
-    SbVec3f getTextCenterPoint() const;
+    SbVec3d getTextCenterPoint() const;
+    void applyPoints();
     void initColors();
 
     void handleEvent(SoEventCallback* cb);
@@ -141,6 +159,12 @@ private:
     SoSwitch* root;
     SoAnnotation* annotation;
     SoTransform* transform;
+    SoTranslation* referenceTranslation;
+    Base::Vector3d referenceOffset;
+    std::function<Base::Vector3d()> referenceProvider;
+    Base::Vector3d lastPoint1;
+    Base::Vector3d lastPoint2;
+    bool hasPoints;
     QPointer<View3DInventorViewer> viewer;
     QuantitySpinBox* spinBox;
     QLabel* lockIconLabel;  ///< Label to display lock icon next to spinbox

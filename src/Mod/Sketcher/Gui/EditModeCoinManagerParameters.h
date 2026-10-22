@@ -414,9 +414,25 @@ struct ConstraintParameters
  */
 struct EditModeScenegraphNodes
 {
+    SoSeparator* EditRoot;
+
+    /** @name Local reference transforms
+     *
+     * Coin stores scene vertices as float32. For geometry far away from the sketch
+     * origin (e.g. tens of kilometres) the float quantisation step becomes larger
+     * than the distance between tessellation vertices and curved edges collapse
+     * into a polygon. Each functional layer therefore stores vertices relative to a
+     * local reference point (a camera-following offset in sketch coordinates) and a
+     * SoTranslation shifts the layer back to absolute coordinates.
+     */
+    //@{
+    SoTranslation* GeometryLayerReferenceTransform = nullptr;
+    SoTranslation* EditCurvesReferenceTransform = nullptr;
+    SoTranslation* EditMarkersReferenceTransform = nullptr;
+    //@}
+
     /** @name Point nodes*/
     //@{
-    SoSeparator* EditRoot;
     SmSwitchboard* PointsGroup;
     std::vector<SoMaterial*> PointsMaterials;
     std::vector<SoCoordinate3*> PointsCoordinate;
@@ -507,6 +523,7 @@ struct EditModeScenegraphNodes
     /** @name Temporal edit text nodes*/
     //@{
     SoText2* textX;
+    SoTranslation* textReferenceTransform = nullptr;
     SoTranslation* textPos;
     SoFont* textFont;
     SoMaterial* textMaterial;
@@ -514,6 +531,7 @@ struct EditModeScenegraphNodes
 
     /** @name Constraint nodes*/
     //@{
+    SoTranslation* ConstraintReferenceTransform = nullptr;
     SmSwitchboard* constrGroup;
     SoPickStyle* constrGrpSelect;
     SoDrawStyle* ConstraintDrawStyle;
@@ -521,6 +539,7 @@ struct EditModeScenegraphNodes
 
     /** @name Information Overlay Layer nodes*/
     //@{
+    SoTranslation* InfoLayerReferenceTransform = nullptr;
     SoGroup* infoGroup;
     SoDrawStyle* InformationDrawStyle;
     //@}

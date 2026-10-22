@@ -25,8 +25,10 @@
 #include <boost/bind/bind.hpp>
 #include <boost/core/ignore_unused.hpp>
 #include <Inventor/SbBox3f.h>
-#include <Inventor/SbLine.h>
+#include <Inventor/SbDPLine.h>
 #include <Inventor/SbTime.h>
+#include <Inventor/SbVec2d.h>
+#include <Inventor/SbVec3d.h>
 #include <Inventor/SoPickedPoint.h>
 #include <Inventor/actions/SoRayPickAction.h>
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
@@ -37,6 +39,7 @@
 #include <Inventor/nodes/SoShapeHints.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoTransform.h>
+#include <Inventor/nodes/SoTranslation.h>
 
 #include <QApplication>
 #include <QFontMetricsF>
@@ -117,6 +120,11 @@ namespace sp = std::placeholders;
 namespace
 {
 bool isFiniteVector(const SbVec3f& vector)
+{
+    return std::isfinite(vector[0]) && std::isfinite(vector[1]) && std::isfinite(vector[2]);
+}
+
+bool isFiniteVector(const SbVec3d& vector)
 {
     return std::isfinite(vector[0]) && std::isfinite(vector[1]) && std::isfinite(vector[2]);
 }
@@ -573,6 +581,8 @@ SbTime ViewProviderSketch::DoubleClick::prvClickTime;
 SbVec2s ViewProviderSketch::DoubleClick::prvClickPos;// used by double-click-detector
 SbVec2s ViewProviderSketch::DoubleClick::prvCursorPos;
 SbVec2s ViewProviderSketch::DoubleClick::newCursorPos;
+SbTime ViewProviderSketch::DoubleClick::prvToolClickTime;
+SbVec2s ViewProviderSketch::DoubleClick::prvToolClickPos;
 
 //**************************************************************************
 // Construction/Destruction
@@ -696,15 +706,27 @@ ViewProviderSketch::ViewProviderSketch()
     rubberband = std::make_unique<Gui::Rubberband>();
 
     cameraSensor.setFunction(&ViewProviderSketch::camSensCB);
+    nonEditCamSensor.setFunction(&ViewProviderSketch::nonEditCamSensCB);
 
     updateColorPropertiesVisibility();
 
     pcSketchFacesToggle->addChild(pcSketchFaces);
+
+    pcFacesRefTransform = new SoTranslation;
+    pcFacesRefTransform->setName("FacesRefTransform");
+    pcSketchFaces->insertChild(pcFacesRefTransform, 0);
 }
 
 ViewProviderSketch::~ViewProviderSketch()
 {
     connectionToolWidget.disconnect();
+    activateViewConnection.disconnect();
+    QObject::disconnect(cameraChangedConnection);
+    nonEditCamSensor.detach();
+    nonEditCamSensor.setDeleteCallback(nullptr, nullptr);
+    nonEditCamSensor.setData(nullptr);
+    delete nonEditCamData;
+    nonEditCamData = nullptr;
 }
 
 void ViewProviderSketch::slotUndoDocument(const Gui::Document& /*doc*/)
@@ -761,6 +783,8 @@ void ViewProviderSketch::activateHandler(std::unique_ptr<DrawSketchHandler> newH
     assert(!sketchHandler);
 
     sketchHandler = std::move(newHandler);
+    DoubleClick::prvToolClickTime = SbTime();
+    DoubleClick::prvToolClickPos = SbVec2s(-16000, -16000);
     setSketchMode(STATUS_SKETCH_UseHandler);
     sketchHandler->activate(this);
 
@@ -1094,7 +1118,7 @@ void ViewProviderSketch::setAngleSnapping(bool enable, Base::Vector2d referenceP
 
 bool ViewProviderSketch::getProjectingLine(const SbVec2s& pnt,
                                            const Gui::View3DInventorViewer* viewer,
-                                           SbLine& line) const
+                                           SbDPLine& line) const
 {
     if (!viewer || !viewer->getSoRenderManager()) {
         return false;
@@ -1141,7 +1165,12 @@ bool ViewProviderSketch::getProjectingLine(const SbVec2s& pnt,
 
     SbViewVolume vol = pCam->getViewVolume();
 
-    vol.projectPointToLine(SbVec2f(pX, pY), line);
+    // Project via the double-precision view volume so the resulting ray is not
+    // quantized to float32 (SbLine/SbVec3f). Without this, sketch coordinates
+    // far from the origin inherit the float32 ULP of the near-plane point and
+    // e.g. a circle's drag radius jumps in multiples of that ULP.
+    vol.getDPViewVolume().projectPointToLine(SbVec2d(static_cast<double>(pX), static_cast<double>(pY)),
+                                             line);
     return isFiniteVector(line.getPosition()) && isFiniteVector(line.getDirection());
 }
 
@@ -1158,7 +1187,7 @@ Base::Placement ViewProviderSketch::getEditingPlacement() const
     return Base::Placement(editDoc->getEditingTransform());
 }
 
-bool ViewProviderSketch::getCoordsOnSketchPlane(const SbVec3f& point, const SbVec3f& normal,
+bool ViewProviderSketch::getCoordsOnSketchPlane(const SbVec3d& point, const SbVec3d& normal,
                                                 double& u, double& v) const
 {
     if (!isFiniteVector(point) || !isFiniteVector(normal)) {
@@ -1220,12 +1249,12 @@ bool ViewProviderSketch::mouseButtonPressed(int Button, bool pressed, const SbVe
     assert(isInEditMode());
 
     // Calculate 3d point to the mouse position
-    SbLine line;
+    SbDPLine line;
     if (!getProjectingLine(cursorPos, viewer, line)) {
         return false;
     }
-    SbVec3f point = line.getPosition();
-    SbVec3f normal = line.getDirection();
+    const SbVec3d& point = line.getPosition();
+    const SbVec3d& normal = line.getDirection();
 
     // use scoped_ptr to make sure that instance gets deleted in all cases
     boost::scoped_ptr<SoPickedPoint> pp(this->getPointOnRay(cursorPos, viewer));
@@ -1239,17 +1268,21 @@ bool ViewProviderSketch::mouseButtonPressed(int Button, bool pressed, const SbVe
 
     double x = std::numeric_limits<double>::quiet_NaN();
     double y = std::numeric_limits<double>::quiet_NaN();
-    SbVec3f pos = point;
-    Base::Vector3d selectionPoint = Base::convertTo<Base::Vector3d>(point);
+    SbVec3d pos = point;
+    Base::Vector3d selectionPoint(point[0], point[1], point[2]);
 
     if (resolvedClickResult.hasPickedPoint()) {
-        pos = Base::convertTo<SbVec3f>(resolvedClickResult.pickedPoint());
-        selectionPoint = resolvedClickResult.pickedPoint();
+        const Base::Vector3d& picked = resolvedClickResult.pickedPoint();
+        pos = SbVec3d(picked.x, picked.y, picked.z);
+        selectionPoint = picked;
     }
     else if (pp) {
         const SoDetail* detail = pp->getDetail();
         if (detail && detail->getTypeId() == SoPointDetail::getClassTypeId()) {
-            pos = pp->getPoint();
+            const SbVec3f& pickedF = pp->getPoint();
+            pos = SbVec3d(static_cast<double>(pickedF[0]),
+                          static_cast<double>(pickedF[1]),
+                          static_cast<double>(pickedF[2]));
         }
         selectionPoint = Base::convertTo<Base::Vector3d>(pp->getPoint());
     }
@@ -1323,6 +1356,23 @@ bool ViewProviderSketch::mouseButtonPressed(int Button, bool pressed, const SbVe
                     return done;
                 }
                 case STATUS_SKETCH_UseHandler: {
+                    const float dci = static_cast<float>(QApplication::doubleClickInterval()) / 1000.0F;
+                    const bool isDoubleClick =
+                        (SbTime::getTimeOfDay() - DoubleClick::prvToolClickTime).getValue() < dci
+                        && SbVec2f(cursorPos - DoubleClick::prvToolClickPos).length()
+                            < dblClickRadius;
+                    DoubleClick::prvToolClickTime = SbTime::getTimeOfDay();
+                    DoubleClick::prvToolClickPos = cursorPos;
+
+                    if (isDoubleClick) {
+                        // A double click finishes the active tool. The first click already
+                        // placed the last point, so do not add a second point here.
+                        DoubleClick::prvToolClickTime = SbTime();
+                        DoubleClick::prvToolClickPos = SbVec2s(-16000, -16000);
+                        sketchHandler->quit();
+                        return true;
+                    }
+
                     Base::Vector2d snappedPos = snapHandle->compute();
                     return sketchHandler->pressButton(snappedPos);
                 }
@@ -1458,6 +1508,9 @@ bool ViewProviderSketch::mouseButtonPressed(int Button, bool pressed, const SbVe
                     setSketchMode(STATUS_NONE);
                     return true;
                 case STATUS_SKETCH_UseHandler: {
+                    if (!sketchHandler) {
+                        return false;
+                    }
                     sketchHandler->applyCursor();
                     Base::Vector2d snappedPos = snapHandle->compute();
                     return sketchHandler->releaseButton(snappedPos);
@@ -1807,7 +1860,7 @@ bool ViewProviderSketch::mouseMove(const SbVec2s& cursorPos, Gui::View3DInventor
     }
 
     // Calculate 3d point to the mouse position
-    SbLine line;
+    SbDPLine line;
     if (!getProjectingLine(cursorPos, viewer, line)) {
         return false;
     }
@@ -2034,7 +2087,7 @@ void ViewProviderSketch::initDragging(int geoId, Sketcher::PointPos pos, Gui::Vi
         drag.relative = true;
 
         // Calculate the click position and use it as the initial point
-        SbLine line2;
+        SbDPLine line2;
         if (!getProjectingLine(DoubleClick::prvCursorPos, viewer, line2)) {
             cancelDrag();
             return false;
@@ -3869,7 +3922,9 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
         setupCoinGeometry(shape,
                 pcSketchFaces,
                 Deviation.getValue(),
-                AngularDeflection.getValue());
+                AngularDeflection.getValue(),
+                false,
+                coinReferenceOffset);
     }
 
     if (prop != &getSketchObject()->Constraints) {
@@ -4138,6 +4193,10 @@ void ViewProviderSketch::attach(App::DocumentObject* pcFeat)
     ViewProvider2DObject::attach(pcFeat);
 
     getOrCreateAnnotation()->addChild(pcSketchFacesToggle);
+
+    activateViewConnection = Gui::Application::Instance->signalActivateView.connect(
+        [this](const Gui::MDIView* view) { onViewActivated(view); });
+    onViewActivated(Gui::Application::Instance->activeView());
 }
 
 void ViewProviderSketch::setupContextMenu(QMenu* menu, QObject* receiver, const char* member)
@@ -4542,6 +4601,13 @@ void ViewProviderSketch::unsetEdit(int ModNum)
         preselection.reset();
         selection.reset();
 
+        // Resume the non-edit camera tracking only after the edit mode is gone.
+        // unsetEditViewer() may run before this point, where isInEditMode() is
+        // still true and attachNonEditCamera() would bail out.
+        if (auto* view = qobject_cast<Gui::View3DInventor*>(getActiveView())) {
+            attachNonEditCamera(view->getViewer());
+        }
+
         if (editingCancelled) {
             App::AutoTransaction trans(getDocument()->getDocument(), "Cancel sketch editing");
             // Restore the object as it was when edit is set.
@@ -4680,6 +4746,20 @@ void ViewProviderSketch::setEditViewer(Gui::View3DInventorViewer* viewer, int Mo
     cameraSensor.setDeleteCallback(&ViewProviderSketch::camSensDeleteCB, camSensorData);
     cameraSensor.attach(viewer->getCamera());
 
+    // Editing uses its own camera sensor; drop the non-edit tracking for the duration.
+    QObject::disconnect(cameraChangedConnection);
+    nonEditCamSensor.detach();
+
+    // Seed the camera-following local reference from the current viewport so that
+    // geometry far away from the sketch origin already has sufficient float32
+    // precision from the first frame (the camera was repositioned above before the
+    // sensor was attached, so no sensor callback fires for it).
+    if (editCoinManager) {
+        const Base::BoundBox2d vpBBox =
+            viewer->getViewportOnXYPlaneOfPlacement(getEditingPlacement());
+        editCoinManager->updateCameraReference(vpBBox.GetCenter());
+    }
+
     blockContextMenu = false;
 
     if (auto* window = viewer->window()->windowHandle()) {
@@ -4711,6 +4791,8 @@ void ViewProviderSketch::unsetEditViewer(Gui::View3DInventorViewer* viewer)
     blockContextMenu = false;
 
     QObject::disconnect(screenChangeConnection);
+
+    attachNonEditCamera(viewer);
 }
 
 void ViewProviderSketch::camSensDeleteCB(void* data, SoSensor *s)
@@ -4742,6 +4824,101 @@ void ViewProviderSketch::camSensCB(void* data, SoSensor*)
         Base::Console().developerWarning("ViewProviderSketch", "Camera is nullptr!\n");
     else
         vp->onCameraChanged(cam);
+}
+
+void ViewProviderSketch::nonEditCamSensCB(void* data, SoSensor*)
+{
+    auto* camData = static_cast<NonEditCamData*>(data);
+    if (!camData || !camData->vp || !camData->viewer)
+        return;
+    if (camData->vp->isInEditMode())
+        return;
+    camData->vp->updateShapeReference(camData->viewer);
+}
+
+void ViewProviderSketch::updateShapeReference(Gui::View3DInventorViewer* viewer)
+{
+    if (isInEditMode() || !viewer)
+        return;
+
+    const Base::Placement plc = getEditingPlacement();
+    const Base::BoundBox2d vpBBox = viewer->getViewportOnXYPlaneOfPlacement(plc);
+    // The reference is added back through float32 nodes, so it must be exact in float32
+    // to keep the rendered geometry aligned with the exact double picking coordinates.
+    const Base::Vector2d nextRef = effectiveCameraReference(vpBBox.GetCenter());
+    const double threshold = std::max(1.0, 0.01 * std::max(vpBBox.Width(), vpBBox.Height()));
+
+    const Base::Vector2d curRef(coinReferenceOffset.x, coinReferenceOffset.y);
+    if ((nextRef - curRef).Length() <= threshold)
+        return;
+
+    const Base::Vector3d offset(nextRef.x, nextRef.y, 0.0);
+    setCoinReferenceOffset(offset);
+
+    if (pcFacesRefTransform) {
+        pcFacesRefTransform->translation.setValue(
+            static_cast<float>(offset.x),
+            static_cast<float>(offset.y),
+            static_cast<float>(offset.z));
+    }
+
+    const auto& shape = getSketchObject()->InternalShape.getValue();
+    if (!shape.IsNull()) {
+        setupCoinGeometry(shape,
+                          pcSketchFaces,
+                          Deviation.getValue(),
+                          AngularDeflection.getValue(),
+                          false,
+                          coinReferenceOffset);
+    }
+}
+
+void ViewProviderSketch::attachNonEditCamera(Gui::View3DInventorViewer* viewer)
+{
+    if (!viewer || isInEditMode())
+        return;
+
+    QObject::disconnect(cameraChangedConnection);
+
+    if (!nonEditCamData) {
+        nonEditCamData = new NonEditCamData{this, nullptr};
+        nonEditCamSensor.setData(nonEditCamData);
+    }
+    nonEditCamData->viewer = viewer;
+
+    nonEditCamSensor.detach();
+    if (SoCamera* cam = viewer->getCamera()) {
+        nonEditCamSensor.attach(cam);
+    }
+
+    cameraChangedConnection = QObject::connect(
+        viewer,
+        &Gui::View3DInventorViewer::cameraChanged,
+        [this, viewer]() {
+            if (isInEditMode())
+                return;
+            nonEditCamSensor.detach();
+            if (SoCamera* cam = viewer->getCamera()) {
+                nonEditCamSensor.attach(cam);
+            }
+            updateShapeReference(viewer);
+        });
+
+    updateShapeReference(viewer);
+}
+
+void ViewProviderSketch::onViewActivated(const Gui::MDIView* view)
+{
+    if (isInEditMode() || !view)
+        return;
+
+    auto* inventor = qobject_cast<Gui::View3DInventor*>(const_cast<Gui::MDIView*>(view));
+    if (!inventor)
+        return;
+    if (inventor->getGuiDocument() != getDocument())
+        return;
+
+    attachNonEditCamera(inventor->getViewer());
 }
 
 void ViewProviderSketch::onCameraChanged(SoCamera* cam)
@@ -4777,6 +4954,19 @@ void ViewProviderSketch::onCameraChanged(SoCamera* cam)
         const Base::BoundBox2d vpBBox = view->getViewer()
                 ->getViewportOnXYPlaneOfPlacement(plc);
         editCoinManager->updateAxesLength(vpBBox);
+
+        // Keep the camera-following local reference up to date so Coin's float32
+        // vertices stay precise wherever the user is looking. Only refetch when the
+        // viewport centre moved noticeably away from the current reference, to avoid
+        // refilling the geometry on every small camera step.
+        // Compare the effective (float32 snapped, origin at ordinary coordinates)
+        // reference. Otherwise the reference would look changed on every camera
+        // event at ordinary coordinates and the whole edit layer would be refilled.
+        const Base::Vector2d nextRef = effectiveCameraReference(vpBBox.GetCenter());
+        const double threshold = std::max(1.0, 0.01 * std::max(vpBBox.Width(), vpBBox.Height()));
+        if ((nextRef - editCoinManager->getCameraReference()).Length() > threshold) {
+            editCoinManager->updateCameraReference(nextRef);
+        }
     }
 
     drawGrid(true);
@@ -5229,17 +5419,26 @@ std::unique_ptr<SoRayPickAction> ViewProviderSketch::getRayPickAction() const
 
 SbVec2f ViewProviderSketch::getScreenCoordinates(SbVec2f sketchcoordinates) const
 {
-    return getScreenCoordinates(SbVec3f(sketchcoordinates[0], sketchcoordinates[1], 0.0f));
+    return getScreenCoordinates(
+        Base::Vector3d(sketchcoordinates[0], sketchcoordinates[1], 0.0)
+    );
 }
 
 SbVec2f ViewProviderSketch::getScreenCoordinates(SbVec3f sketchcoordinates) const
+{
+    return getScreenCoordinates(
+        Base::Vector3d(sketchcoordinates[0], sketchcoordinates[1], sketchcoordinates[2])
+    );
+}
+
+SbVec2f ViewProviderSketch::getScreenCoordinates(const Base::Vector3d& sketchcoordinates) const
 {
     Base::Placement sketchPlacement = getEditingPlacement();
     Base::Vector3d sketchPos(sketchPlacement.getPosition());
     Base::Rotation sketchRot(sketchPlacement.getRotation());
 
     // get global coordinates from sketcher coordinates
-    Base::Vector3d pos(sketchcoordinates[0], sketchcoordinates[1], sketchcoordinates[2]);
+    Base::Vector3d pos = sketchcoordinates;
     sketchRot.multVec(pos, pos);
     pos = pos + sketchPos;
 
@@ -5253,7 +5452,9 @@ SbVec2f ViewProviderSketch::getScreenCoordinates(SbVec3f sketchcoordinates) cons
         return SbVec2f(0, 0);
     }
 
-    SbVec2s viewportPoint = viewer->getPointOnViewport(Base::convertTo<SbVec3f>(pos));
+    // Double precision projection keeps constraint icons and preselection hit
+    // areas aligned with the geometry far away from the origin.
+    SbVec2s viewportPoint = viewer->getPointOnViewport(SbVec3d(pos.x, pos.y, pos.z));
     return SbVec2f(static_cast<float>(viewportPoint[0]), static_cast<float>(viewportPoint[1]));
 }
 
@@ -5302,8 +5503,15 @@ double ViewProviderSketch::getRotation(SbVec3f pos0, SbVec3f pos1) const
         return 0;
 
     SbViewVolume vol = pCam->getViewVolume();
-    if (!getCoordsOnSketchPlane(pos0, vol.getProjectionDirection(), x0, y0)
-        || !getCoordsOnSketchPlane(pos1, vol.getProjectionDirection(), x1, y1)) {
+    const SbVec3f& dir = vol.getProjectionDirection();
+    const SbVec3d dirD(static_cast<double>(dir[0]), static_cast<double>(dir[1]),
+                       static_cast<double>(dir[2]));
+    const SbVec3d pos0D(static_cast<double>(pos0[0]), static_cast<double>(pos0[1]),
+                        static_cast<double>(pos0[2]));
+    const SbVec3d pos1D(static_cast<double>(pos1[0]), static_cast<double>(pos1[1]),
+                        static_cast<double>(pos1[2]));
+    if (!getCoordsOnSketchPlane(pos0D, dirD, x0, y0)
+        || !getCoordsOnSketchPlane(pos1D, dirD, x1, y1)) {
         return 0;
     }
 
@@ -5375,6 +5583,16 @@ void ViewProviderSketch::executeOnSelectionPointSet(
 bool ViewProviderSketch::isInEditMode() const
 {
     return editCoinManager != nullptr;
+}
+
+Base::Vector3d ViewProviderSketch::getCameraReference() const
+{
+    if (!editCoinManager) {
+        return Base::Vector3d();
+    }
+
+    const Base::Vector2d& reference = editCoinManager->getCameraReference();
+    return Base::Vector3d(reference.x, reference.y, 0.0);
 }
 void ViewProviderSketch::generateContextMenu()
 {

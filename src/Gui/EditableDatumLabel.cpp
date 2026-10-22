@@ -26,6 +26,7 @@
 #include <Inventor/nodes/SoAnnotation.h>
 #include <Inventor/nodes/SoOrthographicCamera.h>
 #include <Inventor/nodes/SoTransform.h>
+#include <Inventor/nodes/SoTranslation.h>
 #include <Inventor/nodes/SoSwitch.h>
 #include <Inventor/nodes/SoEventCallback.h>
 #include <Inventor/nodes/SoPickStyle.h>
@@ -73,6 +74,8 @@ EditableDatumLabel::EditableDatumLabel(
     , autoDistanceReverse(false)
     , avoidMouseCursor(avoidMouseCursor)
     , value(0.0)
+    , referenceTranslation(nullptr)
+    , hasPoints(false)
     , viewer(view)
     , spinBox(nullptr)
     , lockIconLabel(nullptr)
@@ -95,6 +98,13 @@ EditableDatumLabel::EditableDatumLabel(
     transform = new SoTransform();
     transform->ref();
     annotation->addChild(transform);
+
+    // Applied after the placement transform, in the sketch local frame, to keep the
+    // label coordinates small (Coin stores them as float32).
+    referenceTranslation = new SoTranslation();
+    referenceTranslation->ref();
+    referenceTranslation->setName("ReferenceOffset");
+    annotation->addChild(referenceTranslation);
 
     eventCallback = new SoEventCallback;
     eventCallback->ref();
@@ -135,6 +145,10 @@ EditableDatumLabel::EditableDatumLabel(
                     this->cameraSensor->attach(this->viewer->getCamera());
                 }
 
+                if (this->referenceProvider) {
+                    this->setReferenceOffset(this->referenceProvider());
+                }
+
                 if (this->autoDistance) {
                     this->setLabelRecommendedDistance();
                 }
@@ -152,6 +166,7 @@ EditableDatumLabel::~EditableDatumLabel()
 {
     deactivate();
     transform->unref();
+    referenceTranslation->unref();
     annotation->unref();
     eventCallback->unref();
     pickStyle->unref();
@@ -499,7 +514,7 @@ void EditableDatumLabel::positionSpinbox()
     spinBox->move(pxCoord);
 }
 
-SbVec3f EditableDatumLabel::getTextCenterPoint() const
+SbVec3d EditableDatumLabel::getTextCenterPoint() const
 {
     // Here we need the 3d point and not the 2d point as are the SoLabel points.
     //  First we get the 2D point (on the sketch/image plane) of the middle of the text label.
@@ -530,7 +545,11 @@ SbVec3f EditableDatumLabel::getTextCenterPoint() const
     Base::Vector3d P2D(point2D[0], point2D[1], point2D[2]);
     P2D.TransformToCoordinateSystem(pos, RXb, RYb);
 
-    return {float(P2D.x), float(P2D.y), float(P2D.z)};
+    // The label points are stored relative to the local reference; restore the
+    // absolute sketch coordinates for the spinbox placement.
+    P2D += referenceOffset;
+
+    return {P2D.x, P2D.y, P2D.z};
 }
 
 void EditableDatumLabel::setPlacement(const Base::Placement& plc)
@@ -655,10 +674,41 @@ void EditableDatumLabel::setFocus()
 
 void EditableDatumLabel::setPoints(SbVec3f p1, SbVec3f p2)
 {
-    label->setPoints(p1, p2);
-    // TODO: here the position of the spinbox is not going to be center of p1, p2 because the point
-    // given by getTextCenterPoint
-    //  is not updated yet. it will be only on redraw so it is actually positioning on previous position.
+    setPoints(
+        Base::Vector3d(p1[0], p1[1], p1[2]),
+        Base::Vector3d(p2[0], p2[1], p2[2])
+    );
+}
+
+void EditableDatumLabel::setPoints(Base::Vector3d p1, Base::Vector3d p2)
+{
+    lastPoint1 = p1;
+    lastPoint2 = p2;
+    hasPoints = true;
+    applyPoints();
+}
+
+void EditableDatumLabel::applyPoints()
+{
+    if (!hasPoints) {
+        return;
+    }
+
+    // Store the coordinates relative to the local reference so that the float32
+    // Coin points stay precise far away from the origin. referenceTranslation
+    // adds the reference back in the sketch local frame.
+    label->setPoints(
+        SbVec3f(
+            static_cast<float>(lastPoint1.x - referenceOffset.x),
+            static_cast<float>(lastPoint1.y - referenceOffset.y),
+            static_cast<float>(lastPoint1.z - referenceOffset.z)
+        ),
+        SbVec3f(
+            static_cast<float>(lastPoint2.x - referenceOffset.x),
+            static_cast<float>(lastPoint2.y - referenceOffset.y),
+            static_cast<float>(lastPoint2.z - referenceOffset.z)
+        )
+    );
 
     positionSpinbox();
     if (autoDistance) {
@@ -666,12 +716,33 @@ void EditableDatumLabel::setPoints(SbVec3f p1, SbVec3f p2)
     }
 }
 
-void EditableDatumLabel::setPoints(Base::Vector3d p1, Base::Vector3d p2)
+void EditableDatumLabel::setReferenceOffset(const Base::Vector3d& offset)
 {
-    setPoints(
-        SbVec3f(float(p1.x), float(p1.y), float(p1.z)),
-        SbVec3f(float(p2.x), float(p2.y), float(p2.z))
-    );
+    referenceOffset = offset;
+    if (referenceTranslation) {
+        referenceTranslation->translation.setValue(
+            SbVec3f(
+                static_cast<float>(offset.x),
+                static_cast<float>(offset.y),
+                static_cast<float>(offset.z)
+            )
+        );
+    }
+
+    if (hasPoints) {
+        applyPoints();
+    }
+    else {
+        label->touch();
+    }
+}
+
+void EditableDatumLabel::setReferenceProvider(std::function<Base::Vector3d()> provider)
+{
+    referenceProvider = std::move(provider);
+    if (referenceProvider) {
+        setReferenceOffset(referenceProvider());
+    }
 }
 
 // NOLINTNEXTLINE

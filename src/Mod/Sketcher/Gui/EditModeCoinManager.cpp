@@ -31,6 +31,7 @@
 #include <ranges>
 
 #include <Inventor/SbVec2f.h>
+#include <Inventor/SbVec3d.h>
 #include <Inventor/SbVec3f.h>
 #include <Inventor/SoPickedPoint.h>
 #include <Inventor/lists/SoPickedPointList.h>
@@ -58,6 +59,7 @@
 #include <Mod/Part/App/Geometry.h>
 #include <Mod/Sketcher/App/Constraint.h>
 #include <Mod/Sketcher/App/GeoList.h>
+#include <Mod/Sketcher/App/SketchObject.h>
 
 #include "EditModeCoinManager.h"
 #include "EditModeConstraintCoinManager.h"
@@ -155,8 +157,9 @@ struct GeometryScreenPreselector
         SketcherGui::CoinMapping& coinMap,
         const SketcherGui::DrawingParameters& drawingParams,
         const SketcherGui::GeoList& geoListArg,
-        std::function<SbVec2f(const SbVec3f&)> screenProjectorArg,
-        Base::Placement sketchPlacementArg
+        std::function<SbVec2f(const SbVec3d&)> screenProjectorArg,
+        Base::Placement sketchPlacementArg,
+        Base::Vector3d referenceOffsetArg
     )
         : geometryLayerParameters(geometryLayerParams)
         , editModeScenegraphNodes(scenegraphNodes)
@@ -165,6 +168,7 @@ struct GeometryScreenPreselector
         , geolist(geoListArg)
         , projectToScreen(std::move(screenProjectorArg))
         , sketchPlacement(std::move(sketchPlacementArg))
+        , referenceOffset(referenceOffsetArg)
 
     {}
 
@@ -297,8 +301,8 @@ struct GeometryScreenPreselector
                     int bestSegmentStart = -1;
                     for (int segmentIndex = 0; segmentIndex < vertexCount - 1; ++segmentIndex) {
                         int currentVertexIndex = vertexOffset + segmentIndex;
-                        SbVec2f segmentStart = projectToScreen(curveValues[currentVertexIndex]);
-                        SbVec2f segmentEnd = projectToScreen(curveValues[currentVertexIndex + 1]);
+                        SbVec2f segmentStart = projectToScreen(toAbsolute(curveValues[currentVertexIndex]));
+                        SbVec2f segmentEnd = projectToScreen(toAbsolute(curveValues[currentVertexIndex + 1]));
                         float distanceSquared
                             = distanceSquaredToSegment(cursorPoint, segmentStart, segmentEnd);
                         if (distanceSquared > curveHitRadiusSquared
@@ -318,8 +322,8 @@ struct GeometryScreenPreselector
                     int geoIndex = coinMapping.getCurveGeoId(curveIndex, layerIndex, subLayerIndex);
                     const SbVec3f& startPoint = curveValues[bestSegmentStart];
                     const SbVec3f& endPoint = curveValues[bestSegmentStart + 1];
-                    SbVec2f startScreen = projectToScreen(startPoint);
-                    SbVec2f endScreen = projectToScreen(endPoint);
+                    SbVec2f startScreen = projectToScreen(toAbsolute(startPoint));
+                    SbVec2f endScreen = projectToScreen(toAbsolute(endPoint));
 
                     float segmentX = endScreen[0] - startScreen[0];
                     float segmentY = endScreen[1] - startScreen[1];
@@ -374,7 +378,7 @@ private:
         }
 
         float pointHitRadius = getPointHitRadius(pointIndex, layerIndex, extraRadiusPx);
-        SbVec2f screenPoint = projectToScreen(pointValues[pointIndex]);
+        SbVec2f screenPoint = projectToScreen(toAbsolute(pointValues[pointIndex]));
         float dx = static_cast<float>(cursorPos[0]) - screenPoint[0];
         float dy = static_cast<float>(cursorPos[1]) - screenPoint[1];
         distanceSquared = dx * dx + dy * dy;
@@ -391,9 +395,21 @@ private:
         return true;
     }
 
+    // Stored coordinates are relative to referenceOffset (float32 precision far from
+    // the origin); restore the exact double precision absolute sketch coordinates
+    // before projecting them.
+    SbVec3d toAbsolute(const SbVec3f& value) const
+    {
+        return SbVec3d(
+            static_cast<double>(value[0]) + referenceOffset.x,
+            static_cast<double>(value[1]) + referenceOffset.y,
+            static_cast<double>(value[2])
+        );
+    }
+
     Base::Vector3d sketchPlanePointToWorld(double x, double y) const
     {
-        Base::Vector3d point(x, y, 0.0);
+        Base::Vector3d point(x + referenceOffset.x, y + referenceOffset.y, 0.0);
         sketchPlacement.getRotation().multVec(point, point);
         return point + sketchPlacement.getPosition();
     }
@@ -450,8 +466,10 @@ private:
     SketcherGui::CoinMapping& coinMapping;
     const SketcherGui::DrawingParameters& drawingParameters;
     const SketcherGui::GeoList& geolist;
-    const std::function<SbVec2f(const SbVec3f&)> projectToScreen;
+    const std::function<SbVec2f(const SbVec3d&)> projectToScreen;
     const Base::Placement sketchPlacement;
+    // Local reference the geometry layer vertices are stored relative to.
+    const Base::Vector3d referenceOffset;
 };
 }  // namespace
 
@@ -1011,6 +1029,13 @@ void EditModeCoinManager::drawEditMarkers(
         = Gui::Inventor::MarkerBitmaps::getMarkerIndex("CIRCLE_LINE", augmentedmarkersize);
 
     // add the points to set
+    editModeScenegraphNodes.EditMarkersReferenceTransform->translation.setValue(
+        SbVec3f(
+            static_cast<float>(cameraReference.x),
+            static_cast<float>(cameraReference.y),
+            0.0f
+        )
+    );
     editModeScenegraphNodes.EditMarkersCoordinate->point.setNum(EditMarkers.size());
     editModeScenegraphNodes.EditMarkersMaterials->diffuseColor.setNum(EditMarkers.size());
     SbVec3f* verts = editModeScenegraphNodes.EditMarkersCoordinate->point.startEditing();
@@ -1021,8 +1046,8 @@ void EditModeCoinManager::drawEditMarkers(
          it != EditMarkers.end();
          ++it, i++) {
         verts[i].setValue(
-            it->x,
-            it->y,
+            it->x - cameraReference.x,
+            it->y - cameraReference.y,
             ViewProviderSketchCoinAttorney::getViewOrientationFactor(viewProvider)
                 * drawingParameters.zEdit
         );
@@ -1036,6 +1061,13 @@ void EditModeCoinManager::drawEditMarkers(
 
 void EditModeCoinManager::drawEdit(const std::vector<Base::Vector2d>& EditCurve, GeometryCreationMode mode)
 {
+    editModeScenegraphNodes.EditCurvesReferenceTransform->translation.setValue(
+        SbVec3f(
+            static_cast<float>(cameraReference.x),
+            static_cast<float>(cameraReference.y),
+            0.0f
+        )
+    );
     editModeScenegraphNodes.EditCurveSet->numVertices.setNum(1);
     editModeScenegraphNodes.EditCurvesCoordinate->point.setNum(EditCurve.size());
     editModeScenegraphNodes.EditCurvesMaterials->diffuseColor.setNum(EditCurve.size());
@@ -1046,8 +1078,8 @@ void EditModeCoinManager::drawEdit(const std::vector<Base::Vector2d>& EditCurve,
     for (std::vector<Base::Vector2d>::const_iterator it = EditCurve.begin(); it != EditCurve.end();
          ++it, i++) {
         verts[i].setValue(
-            it->x,
-            it->y,
+            it->x - cameraReference.x,
+            it->y - cameraReference.y,
             ViewProviderSketchCoinAttorney::getViewOrientationFactor(viewProvider)
                 * drawingParameters.zEdit
         );
@@ -1070,6 +1102,13 @@ void EditModeCoinManager::drawEdit(
         ncoords += v.size();
     }
 
+    editModeScenegraphNodes.EditCurvesReferenceTransform->translation.setValue(
+        SbVec3f(
+            static_cast<float>(cameraReference.x),
+            static_cast<float>(cameraReference.y),
+            0.0f
+        )
+    );
     editModeScenegraphNodes.EditCurveSet->numVertices.setNum(list.size());
     editModeScenegraphNodes.EditCurvesCoordinate->point.setNum(ncoords);
     editModeScenegraphNodes.EditCurvesMaterials->diffuseColor.setNum(ncoords);
@@ -1081,8 +1120,8 @@ void EditModeCoinManager::drawEdit(
     for (const auto& v : list) {
         for (const auto& p : v) {
             verts[coordindex].setValue(
-                p.x,
-                p.y,
+                p.x - cameraReference.x,
+                p.y - cameraReference.y,
                 ViewProviderSketchCoinAttorney::getViewOrientationFactor(viewProvider)
                     * drawingParameters.zEdit
             );
@@ -1131,8 +1170,8 @@ void EditModeCoinManager::drawLineExtensionAutoConstraintHint(
         editModeScenegraphNodes.LineExtensionAutoConstraintHintCoordinate->point.set1Value(
             i,
             SbVec3f(
-                static_cast<float>(point.x),
-                static_cast<float>(point.y),
+                static_cast<float>(point.x - cameraReference.x),
+                static_cast<float>(point.y - cameraReference.y),
                 static_cast<float>(
                     ViewProviderSketchCoinAttorney::getViewOrientationFactor(viewProvider)
                     * drawingParameters.zEdit
@@ -1178,8 +1217,8 @@ void EditModeCoinManager::drawParallelPerpendicularHint(
         editModeScenegraphNodes.ParallelPerpendicularHintCoordinate->point.set1Value(
             i,
             SbVec3f(
-                static_cast<float>(point.x),
-                static_cast<float>(point.y),
+                static_cast<float>(point.x - cameraReference.x),
+                static_cast<float>(point.y - cameraReference.y),
                 static_cast<float>(
                     ViewProviderSketchCoinAttorney::getViewOrientationFactor(viewProvider)
                     * drawingParameters.zEdit
@@ -1202,8 +1241,8 @@ void EditModeCoinManager::setPositionText(const Base::Vector2d& Pos, const SbStr
 {
     editModeScenegraphNodes.textX->string = text;
     editModeScenegraphNodes.textPos->translation = SbVec3f(
-        Pos.x,
-        Pos.y,
+        static_cast<float>(Pos.x - cameraReference.x),
+        static_cast<float>(Pos.y - cameraReference.y),
         ViewProviderSketchCoinAttorney::getViewOrientationFactor(viewProvider) * drawingParameters.zText
     );
 }
@@ -1427,8 +1466,11 @@ bool EditModeCoinManager::detectGeometryPreselection(
 )
 {
     const GeoList geolist = ViewProviderSketchCoinAttorney::getGeoList(viewProvider);
-    auto projectToScreen = [this](const SbVec3f& point) {
-        return ViewProviderSketchCoinAttorney::getScreenCoordinates(viewProvider, point);
+    auto projectToScreen = [this](const SbVec3d& point) {
+        return ViewProviderSketchCoinAttorney::getScreenCoordinates(
+            viewProvider,
+            Base::Vector3d(point[0], point[1], point[2])
+        );
     };
     Base::Placement sketchPlacement = ViewProviderSketchCoinAttorney::getEditingPlacement(viewProvider);
 
@@ -1439,7 +1481,8 @@ bool EditModeCoinManager::detectGeometryPreselection(
         drawingParameters,
         geolist,
         projectToScreen,
-        sketchPlacement
+        sketchPlacement,
+        pEditModeGeometryCoinManager->getReferenceOffset()
     };
 
     if (detectPointPreselection(points, result)) {
@@ -1614,7 +1657,68 @@ void EditModeCoinManager::processGeometryConstraintsInformationOverlay(
 
     processGeometryInformationOverlay(geolistfacade);
 
+    if (editModeScenegraphNodes.ConstraintReferenceTransform) {
+        editModeScenegraphNodes.ConstraintReferenceTransform->translation.setValue(
+            SbVec3f(
+                static_cast<float>(cameraReference.x),
+                static_cast<float>(cameraReference.y),
+                0.0f
+            )
+        );
+    }
+    pEditModeConstraintCoinManager->setReferenceOffset(
+        Base::Vector3d(cameraReference.x, cameraReference.y, 0.0));
     pEditModeConstraintCoinManager->processConstraints(geolistfacade);
+}
+
+void EditModeCoinManager::updateCameraReference(const Base::Vector2d& reference)
+{
+    // The reference is only an anchor for the float coordinates. It has to be exact in
+    // float32, otherwise the rendered position is shifted by
+    // float32(reference) - reference (up to half a float32 ULP, i.e. 32 mm at 1e9 mm)
+    // while picking keeps using the exact double value.
+    cameraReference = effectiveCameraReference(reference);
+
+    // The committed geometry layer stores float coordinates relative to the reference
+    // and carries a matching SoTranslation. Both have to be rewritten together, so
+    // the reference change is immediately followed by a geometry refill.
+    pEditModeGeometryCoinManager->setReferenceOffset(
+        Base::Vector3d(cameraReference.x, cameraReference.y, 0.0));
+    pEditModeGeometryCoinManager->processGeometry(viewProvider.getSketchObject()->getGeoListFacade());
+
+    if (editModeScenegraphNodes.textReferenceTransform) {
+        editModeScenegraphNodes.textReferenceTransform->translation.setValue(
+            SbVec3f(
+                static_cast<float>(cameraReference.x),
+                static_cast<float>(cameraReference.y),
+                0.0f
+            )
+        );
+    }
+
+    // The information overlay has its own reference transform. Rebuild it so its
+    // relative coordinates match the new reference immediately.
+    overlayParameters.rebuildInformationLayer = true;
+    processGeometryInformationOverlay(viewProvider.getSketchObject()->getGeoListFacade());
+
+    if (editModeScenegraphNodes.ConstraintReferenceTransform) {
+        editModeScenegraphNodes.ConstraintReferenceTransform->translation.setValue(
+            SbVec3f(
+                static_cast<float>(cameraReference.x),
+                static_cast<float>(cameraReference.y),
+                0.0f
+            )
+        );
+    }
+    pEditModeConstraintCoinManager->setReferenceOffset(
+        Base::Vector3d(cameraReference.x, cameraReference.y, 0.0));
+    pEditModeConstraintCoinManager->processConstraints(
+        viewProvider.getSketchObject()->getGeoListFacade());
+}
+
+const Base::Vector2d& EditModeCoinManager::getCameraReference() const
+{
+    return cameraReference;
 }
 
 void EditModeCoinManager::updateOverlayParameters()
@@ -1641,6 +1745,17 @@ void EditModeCoinManager::processGeometryInformationOverlay(const GeoListFacade&
         drawingParameters
     );
 
+    ioconv.setReferenceOffset(Base::Vector3d(cameraReference.x, cameraReference.y, 0.0));
+    if (editModeScenegraphNodes.InfoLayerReferenceTransform) {
+        editModeScenegraphNodes.InfoLayerReferenceTransform->translation.setValue(
+            SbVec3f(
+                static_cast<float>(cameraReference.x),
+                static_cast<float>(cameraReference.y),
+                0.0f
+            )
+        );
+    }
+
     // geometry information layer for bsplines, as they need a second round now that max curvature
     // is known
     for (auto geoid : analysisResults.bsplineGeoIds) {
@@ -1655,6 +1770,7 @@ void EditModeCoinManager::processGeometryInformationOverlay(const GeoListFacade&
 
 
     overlayParameters.visibleInformationChanged = false;  // just updated
+    overlayParameters.rebuildInformationLayer = false;
 }
 
 void EditModeCoinManager::updateAxesLength(const Base::BoundBox2d& bb)
@@ -1921,6 +2037,14 @@ void EditModeCoinManager::createEditModeInventorNodes()
     // stuff for the EditCurves +++++++++++++++++++++++++++++++++++++++
     SoSeparator* editCurvesRoot = new SoSeparator;
     editModeScenegraphNodes.EditRoot->addChild(editCurvesRoot);
+    editModeScenegraphNodes.EditCurvesReferenceTransform = new SoTranslation;
+    editModeScenegraphNodes.EditCurvesReferenceTransform->setName(
+        "EditCurvesReferenceTransform"
+    );
+    editModeScenegraphNodes.EditCurvesReferenceTransform->translation.setValue(
+        SbVec3f(0.0f, 0.0f, 0.0f)
+    );
+    editCurvesRoot->addChild(editModeScenegraphNodes.EditCurvesReferenceTransform);
     editModeScenegraphNodes.EditCurvesMaterials = new SoMaterial;
     editModeScenegraphNodes.EditCurvesMaterials->setName("EditCurvesMaterials");
     editCurvesRoot->addChild(editModeScenegraphNodes.EditCurvesMaterials);
@@ -1942,6 +2066,14 @@ void EditModeCoinManager::createEditModeInventorNodes()
     // stuff for the EditMarkers +++++++++++++++++++++++++++++++++++++++
     SoSeparator* editMarkersRoot = new SoSeparator;
     editModeScenegraphNodes.EditRoot->addChild(editMarkersRoot);
+    editModeScenegraphNodes.EditMarkersReferenceTransform = new SoTranslation;
+    editModeScenegraphNodes.EditMarkersReferenceTransform->setName(
+        "EditMarkersReferenceTransform"
+    );
+    editModeScenegraphNodes.EditMarkersReferenceTransform->translation.setValue(
+        SbVec3f(0.0f, 0.0f, 0.0f)
+    );
+    editMarkersRoot->addChild(editModeScenegraphNodes.EditMarkersReferenceTransform);
     editModeScenegraphNodes.EditMarkersMaterials = new SoMaterial;
     editModeScenegraphNodes.EditMarkersMaterials->setName("EditMarkersMaterials");
     editMarkersRoot->addChild(editModeScenegraphNodes.EditMarkersMaterials);
@@ -1982,6 +2114,17 @@ void EditModeCoinManager::createEditModeInventorNodes()
 
     Coordsep->addChild(editModeScenegraphNodes.textFont);
 
+    editModeScenegraphNodes.textReferenceTransform = new SoTranslation();
+    editModeScenegraphNodes.textReferenceTransform->setName("PositionTextReferenceTransform");
+    editModeScenegraphNodes.textReferenceTransform->translation.setValue(
+        SbVec3f(
+            static_cast<float>(cameraReference.x),
+            static_cast<float>(cameraReference.y),
+            0.0f
+        )
+    );
+    Coordsep->addChild(editModeScenegraphNodes.textReferenceTransform);
+
     editModeScenegraphNodes.textPos = new SoTranslation();
     Coordsep->addChild(editModeScenegraphNodes.textPos);
 
@@ -1998,6 +2141,20 @@ void EditModeCoinManager::createEditModeInventorNodes()
     SoSeparator* infoLayerRoot = new SoSeparator;
     infoLayerRoot->setName("InfoLayerRoot");
     editModeScenegraphNodes.EditRoot->addChild(infoLayerRoot);
+
+    // The information overlay stores its vertices relative to the same local
+    // reference as the geometry layer, so B-spline control polygons, combs and
+    // labels keep their precision far from the sketch origin.
+    editModeScenegraphNodes.InfoLayerReferenceTransform = new SoTranslation;
+    editModeScenegraphNodes.InfoLayerReferenceTransform->setName("InfoLayerReferenceTransform");
+    editModeScenegraphNodes.InfoLayerReferenceTransform->translation.setValue(
+        SbVec3f(
+            static_cast<float>(cameraReference.x),
+            static_cast<float>(cameraReference.y),
+            0.0f
+        )
+    );
+    infoLayerRoot->addChild(editModeScenegraphNodes.InfoLayerReferenceTransform);
 
     auto MtlBind = new SoMaterialBinding;
     MtlBind->setName("InformationMaterialBinding");

@@ -3983,6 +3983,25 @@ SbVec2s View3DInventorViewer::getPointOnViewport(const SbVec3f& pnt) const
     return {xpos, ypos};
 }
 
+SbVec2s View3DInventorViewer::getPointOnViewport(const SbVec3d& pnt) const
+{
+    const SbViewportRegion& vp = this->getSoRenderManager()->getViewportRegion();
+    float fRatio = vp.getViewportAspectRatio();
+    const SbVec2s& sp = vp.getViewportSizePixels();
+    SbViewVolume vv = this->getSoRenderManager()->getCamera()->getViewVolume(fRatio);
+
+    // Double precision projection: the float32 view volume quantizes the
+    // camera translation at large coordinates and moves widgets (e.g. the
+    // on-view parameter spin boxes) to a fixed grid position.
+    SbVec3d pt(pnt);
+    vv.getDPViewVolume().projectToScreen(pt, pt);
+
+    auto xpos = short(std::round(pt[0] * sp[0]));  // NOLINT
+    auto ypos = short(std::round(pt[1] * sp[1]));  // NOLINT
+
+    return {xpos, ypos};
+}
+
 QPoint View3DInventorViewer::toQPoint(const SbVec2s& pnt) const
 {
     const SbViewportRegion& vp = this->getSoRenderManager()->getViewportRegion();

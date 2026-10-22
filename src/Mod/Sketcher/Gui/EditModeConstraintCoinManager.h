@@ -170,7 +170,17 @@ public:
 
     void createEditModeInventorNodes();
 
+    /** Sets the local reference the constraint icon positions are stored relative to.
+     *
+     *  SoZoomTranslation::abPos is float32. Far from the sketch origin the
+     *  constraint positions quantize to the same grid point, collapsing all
+     *  symbols and labels together.
+     */
+    void setReferenceOffset(const Base::Vector3d& offset);
+
 private:
+    SbVec3f toReference(double x, double y, float z) const;
+    Base::Vector3d toAbsolute(const SbVec3f& p) const;
     void rebuildConstraintNodes(const GeoListFacade& geolistfacade);  // with specific geometry
 
     void rebuildConstraintNodes(
@@ -253,7 +263,8 @@ private:
         /// Label to be rendered with this icon, if any
         QString label;
 
-        /// Absolute coordinates of the constraint icon
+        /// Position of the constraint icon relative to the layer reference, used to
+        /// decide which icons are close enough to be merged
         SbVec3f position;
 
         /// Pointer to the SoImage object where the icon should be written
@@ -321,6 +332,9 @@ private:
     EditModeScenegraphNodes& editModeScenegraphNodes;
 
     CoinMapping& coinMapping;
+
+    // Local reference the constraint icon positions are stored relative to.
+    Base::Vector3d referenceOffset;
 };
 
 

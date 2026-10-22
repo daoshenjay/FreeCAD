@@ -59,9 +59,10 @@
 class TopoDS_Shape;
 class TopoDS_Face;
 class SoSeparator;
-class SbLine;
+class SbDPLine;
 class SbVec2f;
 class SbVec2s;
+class SbVec3d;
 class SbVec3f;
 class SoCoordinate3;
 class SoInfo;
@@ -90,6 +91,7 @@ class Geometry;
 namespace Gui
 {
 class View3DInventorViewer;
+class MDIView;
 }
 
 namespace Sketcher
@@ -471,6 +473,8 @@ private:
         static SbVec2s prvClickPos;  // used by double-click-detector
         static SbVec2s prvCursorPos;
         static SbVec2s newCursorPos;
+        static SbTime prvToolClickTime;
+        static SbVec2s prvToolClickPos;
     };
 
     /** @brief Private struct grouping ViewProvider parameters and internal variables
@@ -498,6 +502,13 @@ private:
     {
         ViewProviderSketch* vp;
         SoRenderManager* renderMgr;
+    };
+
+    /** @brief Sensor data for the non-edit camera-following local reference. */
+    struct NonEditCamData
+    {
+        ViewProviderSketch* vp;
+        Gui::View3DInventorViewer* viewer;
     };
 
 public:
@@ -601,6 +612,9 @@ public:
 
     /// returns whether the sketch is in edit mode.
     bool isInEditMode() const;
+
+    /// returns the camera-following local reference used by the edit layers.
+    Base::Vector3d getCameraReference() const;
     //@}
 
     // create right click context menu based on selection in the 3D view
@@ -774,6 +788,10 @@ protected:
     static void camSensCB(void* data, SoSensor*);        // camera sensor callback
     static void camSensDeleteCB(void* data, SoSensor*);  // camera sensor callback
     void onCameraChanged(SoCamera* cam);
+    static void nonEditCamSensCB(void* data, SoSensor*);
+    void updateShapeReference(Gui::View3DInventorViewer* viewer);
+    void attachNonEditCamera(Gui::View3DInventorViewer* viewer);
+    void onViewActivated(const Gui::MDIView* view);
     //@}
 
     /** @name miscelanea editing functions */
@@ -847,10 +865,10 @@ private:
     //@{
     /// give the coordinates of a line on the sketch plane in sketcher (2D) coordinates
     /// returns false when the input cannot produce finite sketch coordinates
-    bool getCoordsOnSketchPlane(const SbVec3f& point, const SbVec3f& normal, double& u, double& v) const;
+    bool getCoordsOnSketchPlane(const SbVec3d& point, const SbVec3d& normal, double& u, double& v) const;
 
     /// give projecting line of position, returns false for invalid view projection state
-    bool getProjectingLine(const SbVec2s&, const Gui::View3DInventorViewer* viewer, SbLine&) const;
+    bool getProjectingLine(const SbVec2s&, const Gui::View3DInventorViewer* viewer, SbDPLine&) const;
     //@}
 
     /** @name preselection functions */
@@ -969,6 +987,7 @@ private:
 
     SbVec2f getScreenCoordinates(SbVec2f sketchcoordinates) const;
     SbVec2f getScreenCoordinates(SbVec3f sketchcoordinates) const;
+    SbVec2f getScreenCoordinates(const Base::Vector3d& sketchcoordinates) const;
 
     QFont getApplicationFont() const;
 
@@ -1052,6 +1071,8 @@ private:
     fastsignals::connection connectConstraintAdded;
 
     QMetaObject::Connection screenChangeConnection;
+    QMetaObject::Connection cameraChangedConnection;
+    fastsignals::connection activateViewConnection;
 
     // modes while sketching
     SketchMode Mode;
@@ -1070,6 +1091,7 @@ private:
 
     Gui::CoinPtr<SoSketchFaces> pcSketchFaces;
     Gui::CoinPtr<SoToggleSwitch> pcSketchFacesToggle;
+    SoTranslation* pcFacesRefTransform = nullptr;
 
     std::unique_ptr<ShortcutListener> listener;
 
@@ -1089,6 +1111,8 @@ private:
     Connection connectionToolWidget;
 
     SoNodeSensor cameraSensor;
+    SoNodeSensor nonEditCamSensor;
+    NonEditCamData* nonEditCamData = nullptr;
     int viewOrientationFactor;  // stores if sketch viewed from front or back
 
     bool blockContextMenu;

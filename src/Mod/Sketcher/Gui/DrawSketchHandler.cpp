@@ -403,6 +403,11 @@ void DrawSketchHandler::setSketchGui(ViewProviderSketch* vp)
     sketchgui = vp;
 }
 
+Base::Vector3d DrawSketchHandler::getCameraReference() const
+{
+    return sketchgui ? sketchgui->getCameraReference() : Base::Vector3d();
+}
+
 void DrawSketchHandler::deactivate()
 {
     // Some tools (bspline for instance) may get exited while a transaction is still opened.

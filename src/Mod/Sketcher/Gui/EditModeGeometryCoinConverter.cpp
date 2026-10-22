@@ -52,6 +52,11 @@ EditModeGeometryCoinConverter::EditModeGeometryCoinConverter(
     , coinMapping(coinMap)
 {}
 
+void EditModeGeometryCoinConverter::setReferenceOffset(const Base::Vector3d& reference)
+{
+    referenceOffset = reference;
+}
+
 void EditModeGeometryCoinConverter::convert(const Sketcher::GeoListFacade& geolistfacade)
 {
 
@@ -288,7 +293,11 @@ void EditModeGeometryCoinConverter::convert(const Sketcher::GeoListFacade& geoli
 
         int i = 0;  // setting up the point set
         for (auto& point : Points[l]) {
-            pverts[i++].setValue(point.x, point.y, pointz);
+            pverts[i++].setValue(
+                static_cast<float>(point.x - referenceOffset.x),
+                static_cast<float>(point.y - referenceOffset.y),
+                pointz
+            );
         }
         geometryLayerNodes.PointsCoordinate[l]->point.finishEditing();
 
@@ -302,7 +311,11 @@ void EditModeGeometryCoinConverter::convert(const Sketcher::GeoListFacade& geoli
 
             i = 0;  // setting up the line set
             for (auto& coord : Coords[l][t]) {
-                verts[i++].setValue(coord.x, coord.y, linez);  // NOLINT
+                verts[i++].setValue(
+                    static_cast<float>(coord.x - referenceOffset.x),
+                    static_cast<float>(coord.y - referenceOffset.y),
+                    linez
+                );  // NOLINT
             }
 
             i = 0;  // setting up the indexes of the line set
