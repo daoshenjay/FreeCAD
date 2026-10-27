@@ -3269,8 +3269,36 @@ bool View3DInventorViewer::renderToFramebuffer(
     return true;
 }
 
+void View3DInventorViewer::markClippingDirty()
+{
+    clippingDirty = true;
+}
+
+/** Bring the camera clipping range in line with the current object bounds.
+ *
+ * A primitive that is resized can grow around the camera.  Coin's automatic
+ * near/far update then refuses to touch the camera because the scene box
+ * straddles the camera plane, leaving the planes fitted to the old, smaller
+ * shape and clipping the new one until the user rotates the view (rotation
+ * re-derives the planes in NavigationStyle::reorientCamera()).  Refresh them
+ * here instead, using the same double-precision object bounds, and only widen
+ * the existing range so the automatic path cannot clip visible content.
+ */
+void View3DInventorViewer::refreshClippingPlanes()
+{
+    if (!clippingDirty) {
+        return;
+    }
+    clippingDirty = false;
+    if (navigation) {
+        navigation->updateClippingPlanes(getSoRenderManager()->getCamera(), true);
+    }
+}
+
 void View3DInventorViewer::actualRedraw()
 {
+    refreshClippingPlanes();
+
     switch (renderType) {
         case Native:
             renderScene();

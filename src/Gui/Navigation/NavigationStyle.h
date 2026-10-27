@@ -227,6 +227,17 @@ public:
     void setRotationCenter(const SbVec3d& cnt);
     void setRotationCenter(const SbVec3f& cnt);
 
+    /** Re-measure the double-precision scene bounds and refresh the camera's
+     *  near/far planes.  This is the same update the rotation path performs,
+     *  exposed so that a scene change (for example a primitive being resized)
+     *  can keep the clipping range in sync without waiting for a rotation.
+     *
+     *  With \a expandOnly the current planes are kept and only widened, which
+     *  makes the refresh safe for an automatic trigger: content that is
+     *  already visible is never clipped by the new measurement.
+     */
+    void updateClippingPlanes(SoCamera* camera, bool expandOnly = true);
+
     SoCamera* getCamera() const;
     std::shared_ptr<NavigationAnimation> setCameraOrientation(
         const SbRotation& orientation,
@@ -374,7 +385,7 @@ private:
     bool getObjectBoundingBoxCenter(SbVec3f& center) const;
     void applyOrbitDragCameraConstraints(const OrbitDragState& state);
     void refreshClipDepth();
-    void applyClipDepth(SoCamera* camera) const;
+    void applyClipDepth(SoCamera* camera, bool expandOnly = false) const;
     bool isDoubleClickCandidate(const SoMouseButtonEvent* event) const;
     void deferMouseDownEvent(const SoMouseButtonEvent* event);
     void clearDeferredMouseDownEvent();

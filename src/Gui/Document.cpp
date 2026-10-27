@@ -1168,6 +1168,19 @@ void Document::slotChangedObject(const App::DocumentObject& Obj, const App::Prop
 
         handleChildren3D(viewProvider);
 
+        // The geometry or placement may have changed the object bounds.  Do
+        // not leave the camera's near/far planes at the old fit: Coin refuses
+        // to update them when the new bounds straddle the camera, which used
+        // to clip a resized primitive until the user rotated the view.  The
+        // refresh itself is deferred to the next redraw and coalesced.
+        for (auto* mdiView : getMDIViewsOfType(View3DInventor::getClassTypeId())) {
+            if (auto* view = freecad_cast<View3DInventor*>(mdiView)) {
+                if (auto* viewer = view->getViewer()) {
+                    viewer->markClippingDirty();
+                }
+            }
+        }
+
         if (viewProvider->isDerivedFrom<ViewProviderDocumentObject>()) {
             signalChangedObject(static_cast<ViewProviderDocumentObject&>(*viewProvider), Prop);
         }

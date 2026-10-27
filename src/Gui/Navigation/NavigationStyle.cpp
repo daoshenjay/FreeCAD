@@ -1689,6 +1689,23 @@ void NavigationStyle::applyOrbitDragCameraConstraints(const OrbitDragState& stat
     camera->farDistance = float(farDistance);
 }
 
+/** Re-measure the scene bounds and refresh the camera's near/far planes.
+ *
+ * The rotation path already does this per frame (see reorientCamera()).  This
+ * entry point lets an external scene change -- typically a primitive whose
+ * dimensions were edited -- update the planes as well, without waiting for the
+ * user to rotate the view.  \a expandOnly keeps the current range and only
+ * widens it, so the automatic refresh can never clip content that is already
+ * visible.
+ */
+void NavigationStyle::updateClippingPlanes(SoCamera* camera, bool expandOnly)
+{
+    refreshClipDepth();
+    if (this->sceneClipRadius > 0.0) {
+        applyClipDepth(camera, expandOnly);
+    }
+}
+
 /** Measure the scene's double-precision bounding sphere.
  *
  * The near/far update in reorientCamera() needs the real scene extent, which
@@ -1728,7 +1745,7 @@ void NavigationStyle::refreshClipDepth()
  * rescue path that Coin's automatic near/far update cannot provide at large
  * coordinates.
  */
-void NavigationStyle::applyClipDepth(SoCamera* camera) const
+void NavigationStyle::applyClipDepth(SoCamera* camera, bool expandOnly) const
 {
     if (!camera || this->sceneClipRadius <= 0.0) {
         return;
@@ -1758,15 +1775,43 @@ void NavigationStyle::applyClipDepth(SoCamera* camera) const
     // near half of the scene.  A perspective near plane must stay strictly
     // positive, so only that side is floored.
     double nearDistance = centerDepth - this->sceneClipRadius;
+    const double minClipSpan = std::max(this->sceneClipRadius * 1.0e-3, 1.0e-4);
+    double farDistance =
+        std::max(centerDepth + this->sceneClipRadius, nearDistance + minClipSpan);
+
+    if (expandOnly) {
+        // This path is driven by a scene change, not by a rotation.  The
+        // bounding sphere may not cover everything that is currently visible
+        // (for example a second object far away from the edited one), so only
+        // ever widen the existing range.  Rotation keeps using the exact
+        // range below because it re-centres the measurement around the pivot.
+        const double currentNear = camera->nearDistance.getValue();
+        const double currentFar = camera->farDistance.getValue();
+        if (std::isfinite(currentNear) && std::isfinite(currentFar)
+            && currentFar > currentNear) {
+            nearDistance = std::min(nearDistance, currentNear);
+            farDistance = std::max(farDistance, currentFar);
+        }
+    }
+
+    // The merge above may have lowered the near plane below the perspective
+    // floor, so apply the clamp afterwards.
     if (isPerspective) {
         nearDistance =
             std::max(nearDistance, std::max(this->sceneClipRadius * 1.0e-4, 1.0e-5));
     }
-    const double minClipSpan = std::max(this->sceneClipRadius * 1.0e-3, 1.0e-4);
-    const double farDistance =
-        std::max(centerDepth + this->sceneClipRadius, nearDistance + minClipSpan);
-    camera->nearDistance = float(nearDistance);
-    camera->farDistance = float(farDistance);
+    farDistance = std::max(farDistance, nearDistance + minClipSpan);
+
+    // Compare against the stored float values so an unchanged range does not
+    // schedule another redraw on every automatic refresh.
+    const float newNear = float(nearDistance);
+    const float newFar = float(farDistance);
+    if (camera->nearDistance.getValue() != newNear) {
+        camera->nearDistance = newNear;
+    }
+    if (camera->farDistance.getValue() != newFar) {
+        camera->farDistance = newFar;
+    }
 }
 
 SbBool NavigationStyle::doSpin()

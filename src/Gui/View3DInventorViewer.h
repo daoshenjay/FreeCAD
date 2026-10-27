@@ -612,6 +612,14 @@ public:
     //! Double-precision bounding box of the physical object group (objectGroup)
     bool getObjectBoundBox(Base::BoundBox3d& box) const;
 
+    /** Mark the camera near/far planes as stale after a scene change.
+     *
+     * The planes are refreshed from the double-precision object bounds before
+     * the next redraw.  Unlike fitting, this does not move or zoom the camera;
+     * it only keeps the clipping range in sync with the geometry.
+     */
+    void markClippingDirty();
+
 Q_SIGNALS:
     void cameraChanged();
 
@@ -661,6 +669,7 @@ private:
     void syncNaviCubeVisibility();
     void drawAxisCross();
     void drawSingleBackground(const QColor&);
+    void refreshClippingPlanes();
     void recoverFromRenderMemoryException();
     void renderDelayedAnnotations(SoGLRenderAction* glra);
     void renderGLActionScene(const QColor& backgroundColor, SoGLRenderAction* glra);
@@ -755,6 +764,10 @@ private:
 
     std::string overrideMode;
     Gui::Document* guiDocument = nullptr;
+
+    //! The camera near/far planes need to be re-derived from the object bounds
+    //! before the next redraw because the scene geometry changed.
+    bool clippingDirty = false;
 
     ViewerEventFilter* viewerEventFilter;
 
