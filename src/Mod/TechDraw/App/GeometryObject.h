@@ -44,6 +44,8 @@
 #include "Geometry.h"
 #include "ShapeUtils.h"
 
+class HLRBRep_HLRToShape;
+class HLRBRep_PolyHLRToShape;
 
 namespace TechDraw
 {
@@ -83,6 +85,10 @@ public:
 
     void projectShape(const TopoDS_Shape& input, const gp_Ax2& viewAxis);
     void projectShapeWithPolygonAlgo(const TopoDS_Shape& input, const gp_Ax2& viewAxis);
+    void setProjectionSources(const std::vector<ProjectionSource>& sources)
+    {
+        m_projectionSources = sources;
+    }
     static TopoDS_Shape projectSimpleShape(const TopoDS_Shape& shape, const gp_Ax2& CS, bool invertYRequired = true);
     static TopoDS_Shape simpleProjection(const TopoDS_Shape& shape, const gp_Ax2& projCS);
     static TopoDS_Shape projectFace(const TopoDS_Shape& face, const gp_Ax2& CS);
@@ -144,6 +150,10 @@ protected:
 
     void addGeomFromCompound(TopoDS_Shape edgeCompound, EdgeClass category, bool visible);
     TechDraw::DrawViewDetail* isParentDetail();
+    void collectRebarProjections(HLRBRep_HLRToShape& hlrToShape);
+    void collectRebarProjections(HLRBRep_PolyHLRToShape& hlrToShape);
+    void tagRebarEdges();
+    static bool edgesMatch(const TopoDS_Edge& edge1, const TopoDS_Edge& edge2, double tolerance);
 
     //similar function in Geometry?
     /*!
@@ -166,6 +176,24 @@ protected:
     double m_focus;
     bool m_usePolygonHLR;
     int m_scrubCount;
+
+    std::vector<ProjectionSource> m_projectionSources;
+
+    struct RebarProjection
+    {
+        App::DocumentObject* object {nullptr};
+        TopoDS_Shape visHard;
+        TopoDS_Shape visOutline;
+        TopoDS_Shape visSmooth;
+        TopoDS_Shape visSeam;
+        TopoDS_Shape visIso;
+        TopoDS_Shape hidHard;
+        TopoDS_Shape hidOutline;
+        TopoDS_Shape hidSmooth;
+        TopoDS_Shape hidSeam;
+        TopoDS_Shape hidIso;
+    };
+    std::vector<RebarProjection> m_rebarProjections;
 };
 
 using GeometryObjectPtr = std::shared_ptr<GeometryObject>;

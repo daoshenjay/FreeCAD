@@ -66,6 +66,7 @@
 
 
 #include <App/Document.h>
+#include <App/PropertyStandard.h>
 #include <Base/BoundBox.h>
 #include <Base/Console.h>
 #include <Base/Converter.h>
@@ -205,6 +206,48 @@ std::vector<App::DocumentObject*> DrawViewPart::getAllSources() const
     return result;
 }
 
+std::vector<ProjectionSource> DrawViewPart::collectSourceShapes() const
+{
+    const auto sources = getAllSources();
+    bool hasRebar = false;
+    for (auto* obj : sources) {
+        if (isRebarObject(obj)) {
+            hasRebar = true;
+            break;
+        }
+    }
+    if (!hasRebar) {
+        return {};
+    }
+
+    std::vector<ProjectionSource> result;
+    result.reserve(sources.size());
+    for (auto* obj : sources) {
+        if (!obj) {
+            continue;
+        }
+
+        TopoDS_Shape sourceShape = ShapeExtractor::getShapes({obj}, true);
+        if (sourceShape.IsNull()) {
+            continue;
+        }
+
+        result.push_back({sourceShape, obj, isRebarObject(obj)});
+    }
+    return result;
+}
+
+bool DrawViewPart::isRebarObject(const App::DocumentObject* obj)
+{
+    if (!obj) {
+        return false;
+    }
+
+    auto* property = obj->getPropertyByName("IsRebar");
+    auto* boolProperty = dynamic_cast<App::PropertyBool*>(property);
+    return boolProperty && boolProperty->getValue();
+}
+
 //! pick vertex objects out of the Source properties and
 //! add them directly to the geometry without going through HLR
 void DrawViewPart::addPoints()
@@ -243,6 +286,8 @@ App::DocumentObjectExecReturn* DrawViewPart::execute()
         Base::Console().message("DVP::execute - %s - Source shape is Null.\n", getNameInDocument());
         return DrawView::execute();
     }
+
+    m_sourceShapes = collectSourceShapes();
 
     //make sure the XDirection property is valid. Mostly for older models.
     if (!checkXDirection()) {
@@ -323,7 +368,24 @@ GeometryObjectPtr DrawViewPart::makeGeometryForShape(const TopoDS_Shape& shape)
     m_saveCentroid = Base::convertTo<Base::Vector3d>(gCentroid);
     m_saveShape = centerScaleRotate(this, localShape, m_saveCentroid);
 
-    return buildGeometryObject(localShape, getProjectionCS());
+    std::vector<ProjectionSource> transformedSources;
+    std::vector<ProjectionSource> centeredSources;
+    transformedSources.reserve(m_sourceShapes.size());
+    centeredSources.reserve(m_sourceShapes.size());
+    for (const auto& source : m_sourceShapes) {
+        if (source.shape.IsNull()) {
+            continue;
+        }
+        BRepBuilderAPI_Copy sourceCopier(source.shape, copyGeometry, copyMesh);
+        TopoDS_Shape sourceShape = sourceCopier.Shape();
+        TopoDS_Shape centeredShape = centerScaleRotate(this, sourceShape, m_saveCentroid);
+        centeredSources.push_back({centeredShape, source.object, source.isRebar});
+        transformedSources.push_back({sourceShape, source.object, source.isRebar});
+    }
+    //keep the centered sources for a possible automatic rescale pass
+    m_sourceShapes = std::move(centeredSources);
+
+    return buildGeometryObject(localShape, getProjectionCS(), transformedSources);
 }
 
 //! Modify a shape by centering, scaling and rotating and return the centered (but not rotated) shape
@@ -348,6 +410,14 @@ TopoDS_Shape DrawViewPart::centerScaleRotate(const DrawViewPart *dvp, TopoDS_Sha
 TechDraw::GeometryObjectPtr DrawViewPart::buildGeometryObject(const TopoDS_Shape& shape,
                                                               const gp_Ax2& viewAxis)
 {
+    return buildGeometryObject(shape, viewAxis, {});
+}
+
+TechDraw::GeometryObjectPtr DrawViewPart::buildGeometryObject(
+    const TopoDS_Shape& shape,
+    const gp_Ax2& viewAxis,
+    const std::vector<ProjectionSource>& sources)
+{
     TechDraw::GeometryObjectPtr go(
         std::make_shared<TechDraw::GeometryObject>(getNameInDocument(), this));
     go->setIsoCount(IsoCount.getValue());
@@ -355,6 +425,7 @@ TechDraw::GeometryObjectPtr DrawViewPart::buildGeometryObject(const TopoDS_Shape
     go->setFocus(Focus.getValue());
     go->usePolygonHLR(CoarseView.getValue());
     go->setScrubCount(ScrubCount.getValue());
+    go->setProjectionSources(sources);
 
     if (CoarseView.getValue()) {
         //the polygon approximation HLR process runs quickly, so doesn't need to be in a

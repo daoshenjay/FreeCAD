@@ -36,12 +36,17 @@
 
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Shape.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_TrimmedCurve.hxx>
 
 #include "Tag.h"
+
+namespace App {
+class DocumentObject;
+}
 
 namespace Part {
 class TopoShape;
@@ -50,6 +55,13 @@ class TopoShape;
 namespace TechDraw {
 
 class DrawViewPart;
+
+struct ProjectionSource
+{
+    TopoDS_Shape shape;
+    App::DocumentObject* object {nullptr};
+    bool isRebar {false};
+};
 
 enum class ExtractionType : int {               //obs
     Plain,
@@ -163,6 +175,10 @@ class TechDrawExport BaseGeom : public std::enable_shared_from_this<BaseGeom>, p
         void sourceIndex(int si) { m_sourceIndex = si; }
         std::string getCosmeticTag() const { return cosmeticTag; }
         void setCosmeticTag(const std::string& t) { cosmeticTag = t; }
+        bool isRebar() const { return m_isRebar; }
+        void setIsRebar(bool state) { m_isRebar = state; }
+        App::DocumentObject* getSourceObject() const { return m_sourceObject; }
+        void setSourceObject(App::DocumentObject* obj) { m_sourceObject = obj; }
         Part::TopoShape asTopoShape(double scale = 1.0);
 
         virtual double getStartAngle() { return 0.0; }
@@ -185,6 +201,8 @@ protected:
         SourceType m_source;
         int m_sourceIndex;
         std::string cosmeticTag;
+        bool m_isRebar;
+        App::DocumentObject* m_sourceObject;
 //NOLINTEND (misc-non-private-member-variables-in-classes)
 };
 using BaseGeomPtrVector = std::vector<BaseGeomPtr>;    //new style

@@ -49,6 +49,7 @@ public:
     App::PropertyLength HiddenWidth;
     App::PropertyLength IsoWidth;
     App::PropertyLength ExtraWidth;
+    App::PropertyLength RebarLineWidth;
     App::PropertyBool   ArcCenterMarks;
     App::PropertyFloat  CenterScale;
     App::PropertyBool   HorizCenterLine;

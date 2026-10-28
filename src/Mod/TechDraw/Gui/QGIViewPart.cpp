@@ -25,16 +25,19 @@
 #include <QPainterPath>
 #include <QKeyEvent>
 #include <QGraphicsTransform>
+#include <algorithm>
 #include <cstdio>
 #include <qmath.h>
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/PropertyStandard.h>
 #include <Base/Console.h>
 #include <Base/Parameter.h>
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
 #include <Gui/Selection/Selection.h>
+#include <Gui/ViewProvider.h>
 #include <Mod/TechDraw/App/CenterLine.h>
 #include <Mod/TechDraw/App/Cosmetic.h>
 #include <Mod/TechDraw/App/DrawComplexSection.h>
@@ -80,6 +83,25 @@ using DU = DrawUtil;
 using FillMode = QGIFace::FillMode;
 
 const float lineScaleFactor = Rez::guiX(1.);// temp fiddle for devel
+
+namespace
+{
+QColor sourceLineColor(App::DocumentObject* source)
+{
+    if (!source) {
+        return {};
+    }
+
+    Gui::ViewProvider* viewProvider = QGIView::getViewProvider(source);
+    if (!viewProvider) {
+        return {};
+    }
+
+    auto* property = viewProvider->getPropertyByName("LineColor");
+    auto* colorProperty = dynamic_cast<App::PropertyColor*>(property);
+    return colorProperty ? colorProperty->getValue().asValue<QColor>() : QColor();
+}
+}// namespace
 
 QGIViewPart::QGIViewPart()
 {
@@ -301,6 +323,8 @@ void QGIViewPart::drawViewPart()
     if (!vp)
         return;
 
+    updateRebarWidthLimit();
+
     prepareGeometryChange();
     removePrimitives();//clean the slate
     removeDecorations();
@@ -405,10 +429,15 @@ void QGIViewPart::drawAllEdges()
     auto vp = static_cast<ViewProviderViewPart*>(getViewProvider(getViewObject()));
 
     const TechDraw::BaseGeomPtrVector& geoms = dvp->getEdgeGeometry();
+    auto effectiveWidth = [&](double width) {
+        return m_rebarWidthLimitActive ? std::min(width, m_rebarWidthLimit) : width;
+    };
+
     TechDraw::BaseGeomPtrVector::const_iterator itGeom = geoms.begin();
     QGIEdge* item{};
     for (int iEdge = 0; itGeom != geoms.end(); itGeom++, iEdge++) {
         bool showItem = true;
+        bool hasUserFormat = false;
         if (!showThisEdge(*itGeom)) {
             continue;
         }
@@ -440,6 +469,7 @@ void QGIViewPart::drawAllEdges()
             // geometry edge - apply format if applicable
             TechDraw::GeomFormat* gf = dvp->getGeomFormatBySelection(iEdge);
             if (gf) {
+                hasUserFormat = true;
                 Base::Color  color = Preferences::getAccessibleColor(gf->m_format.getColor());
                 item->setNormalColor(color.asValue<QColor>());
                 int lineNumber = gf->m_format.getLineNumber();
@@ -452,16 +482,18 @@ void QGIViewPart::drawAllEdges()
             } else {
                 if (!(*itGeom)->getHlrVisible()) {
                     // hidden line without a format
-                    item->setLinePen(m_dashedLineGenerator->getLinePen(Preferences::HiddenLineStyle(),
-                                                                       vp->LineWidth.getValue()));
+                    item->setLinePen(m_dashedLineGenerator->getLinePen(
+                        Preferences::HiddenLineStyle(),
+                        effectiveWidth(vp->LineWidth.getValue())));
                     item->setHiddenEdge(true);
-                    item->setWidth(Rez::guiX(vp->HiddenWidth.getValue()));   //thin
+                    item->setWidth(Rez::guiX(effectiveWidth(vp->HiddenWidth.getValue())));   //thin
                     item->setZValue(ZVALUE::HIDEDGE);
                 } else {
                     // unformatted visible line, draw as continuous line
                     // "smooth" edges should use the "thin" width as used for hidden lines.
-                    double width = (*itGeom)->getClassOfEdge() == EdgeClass::SMOOTH ?
-                                            vp->HiddenWidth.getValue() : vp->LineWidth.getValue();
+                    double width = effectiveWidth((*itGeom)->getClassOfEdge() == EdgeClass::SMOOTH ?
+                                                      vp->HiddenWidth.getValue() :
+                                                      vp->LineWidth.getValue());
                     item->setLinePen(m_dashedLineGenerator->getLinePen(1, width));
                     item->setWidth(Rez::guiX(width));
                 }
@@ -470,8 +502,25 @@ void QGIViewPart::drawAllEdges()
 
         if ((*itGeom)->getClassOfEdge() == EdgeClass::UVISO) {
             // we don't have a style option for iso-parametric lines so draw continuous
-            item->setLinePen(m_dashedLineGenerator->getLinePen(1, vp->IsoWidth.getValue()));
-            item->setWidth(Rez::guiX(vp->IsoWidth.getValue()));   //graphic
+            double width = effectiveWidth(vp->IsoWidth.getValue());
+            item->setLinePen(m_dashedLineGenerator->getLinePen(1, width));
+            item->setWidth(Rez::guiX(width));   //graphic
+        }
+
+        if ((*itGeom)->isRebar() && !hasUserFormat) {
+            QColor rebarColor = sourceLineColor((*itGeom)->getSourceObject());
+            if (rebarColor.isValid()) {
+                item->setNormalColor(rebarColor);
+            }
+
+            double width = vp->RebarLineWidth.getValue();
+            item->setLinePen(m_dashedLineGenerator->getLinePen(1, width));
+            item->setWidth(Rez::guiX(width));
+
+            if (!(*itGeom)->getHlrVisible()) {
+                // show hidden rebar edges as visible lines in the source object's color
+                item->setHiddenEdge(false);
+            }
         }
 
         item->setPos(0.0, 0.0);//now at group(0, 0)
@@ -1372,10 +1421,45 @@ void QGIViewPart::setGroupSelection(bool isSelected, const std::vector<std::stri
     }
 }
 
+void QGIViewPart::updateRebarWidthLimit()
+{
+    m_rebarWidthLimitActive = false;
+    m_rebarWidthLimit = 0.0;
+
+    auto dvp = static_cast<TechDraw::DrawViewPart*>(getViewObject());
+    if (!dvp) {
+        return;
+    }
+
+    auto vp = static_cast<ViewProviderViewPart*>(getViewProvider(getViewObject()));
+    if (!vp) {
+        return;
+    }
+
+    m_rebarWidthLimit = vp->RebarLineWidth.getValue() * 0.5;
+    if (!dvp->HardHidden.getValue()) {
+        return;
+    }
+
+    const TechDraw::BaseGeomPtrVector& geoms = dvp->getEdgeGeometry();
+    m_rebarWidthLimitActive = std::any_of(
+        geoms.begin(),
+        geoms.end(),
+        [](const TechDraw::BaseGeomPtr& geom) { return geom->isRebar(); });
+}
+
 double QGIViewPart::getLineWidth() {
     auto vp{static_cast<ViewProviderViewPart*>(getViewProvider(getViewObject()))};
+    if (!vp) {
+        return 0.0;
+    }
 
-    return vp->LineWidth.getValue() * lineScaleFactor; // Thick
+    double width = vp->LineWidth.getValue();
+    if (m_rebarWidthLimitActive) {
+        width = std::min(width, m_rebarWidthLimit);
+    }
+
+    return width * lineScaleFactor; // Thick
 }
 
 double QGIViewPart::getVertexSize() {

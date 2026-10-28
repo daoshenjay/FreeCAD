@@ -104,6 +104,8 @@ ViewProviderViewPart::ViewProviderViewPart()
     weight = TechDraw::LineGroup::getDefaultWidth("Extra");
     ADD_PROPERTY_TYPE(ExtraWidth, (weight), group, App::Prop_None, "The thickness of LineGroup Extra lines, if enabled");
 
+    ADD_PROPERTY_TYPE(RebarLineWidth, (0.20), group, App::Prop_None, "The thickness of rebar lines");
+
     double defScale = Preferences::getPreferenceGroup("Decorations")->GetFloat("CenterMarkScale", 0.50);
 
     //decorations
@@ -187,6 +189,7 @@ void ViewProviderViewPart::onChanged(const App::Property* prop)
         prop == &(HiddenWidth) ||
         prop == &(IsoWidth) ||
         prop == &(ExtraWidth) ||
+        prop == &(RebarLineWidth) ||
         prop == &(HighlightAdjust) ||
         prop == &(ArcCenterMarks) ||
         prop == &(CenterScale) ||

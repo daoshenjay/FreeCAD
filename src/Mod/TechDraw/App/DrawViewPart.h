@@ -40,6 +40,7 @@
 
 #include "CosmeticExtension.h"
 #include "DrawView.h"
+#include "Geometry.h"
 
 
 class gp_Pnt;
@@ -263,9 +264,15 @@ protected:
 
     virtual TechDraw::GeometryObjectPtr buildGeometryObject(const TopoDS_Shape& shape,
                                                             const gp_Ax2& viewAxis);
+    TechDraw::GeometryObjectPtr buildGeometryObject(const TopoDS_Shape& shape,
+                                                    const gp_Ax2& viewAxis,
+                                                    const std::vector<ProjectionSource>& sources);
     virtual TechDraw::GeometryObjectPtr makeGeometryForShape(const TopoDS_Shape& shape);//const??
     void partExec(TopoDS_Shape& shape);
     virtual void addPoints(void);
+
+    std::vector<ProjectionSource> collectSourceShapes() const;
+    static bool isRebarObject(const App::DocumentObject* obj);
 
     void extractFaces();
     void findFacesNew(const std::vector<TechDraw::BaseGeomPtr>& goEdges);
@@ -277,6 +284,7 @@ protected:
 
     TopoDS_Shape m_saveShape;     //TODO: make this a Property.  Part::TopoShapeProperty??
     Base::Vector3d m_saveCentroid;//centroid before centering shape in origin
+    std::vector<ProjectionSource> m_sourceShapes;
 
     std::vector<TechDraw::VertexPtr> m_referenceVerts;
 

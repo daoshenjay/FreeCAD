@@ -194,7 +194,9 @@ BaseGeom::BaseGeom() :
     ref3D(-1),                      //obs?
     cosmetic(false),
     m_source(SourceType::GEOMETRY),
-    m_sourceIndex(-1)
+    m_sourceIndex(-1),
+    m_isRebar(false),
+    m_sourceObject(nullptr)
 {
     occEdge = TopoDS_Edge();
     cosmeticTag = std::string();
@@ -219,6 +221,8 @@ BaseGeomPtr BaseGeom::copy()
     result->source(m_source);
     result->sourceIndex(m_sourceIndex);
     result->cosmeticTag = cosmeticTag;
+    result->m_isRebar = m_isRebar;
+    result->m_sourceObject = m_sourceObject;
 
     return result;
 }
@@ -234,7 +238,8 @@ std::string BaseGeom::toString() const
           ref3D << ", " <<
           cosmetic << ", " <<
           m_source << ", " <<
-          m_sourceIndex;
+          m_sourceIndex << ", " <<
+          m_isRebar;
     return ss.str();
 }
 

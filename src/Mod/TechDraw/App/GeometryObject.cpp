@@ -61,7 +61,10 @@
 #include <gp_Vec.hxx>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
+#include <map>
 
 #include <Base/Console.h>
 #include <Mod/Part/App/PartFeature.h>
@@ -136,6 +139,7 @@ void GeometryObject::clear()
     vertexGeom.clear();
     faceGeom.clear();
     edgeGeom.clear();
+    m_rebarProjections.clear();
 }
 
 void GeometryObject::projectShape(const TopoDS_Shape& inShape, const gp_Ax2& viewAxis)
@@ -146,7 +150,16 @@ void GeometryObject::projectShape(const TopoDS_Shape& inShape, const gp_Ax2& vie
     try {
         brep_hlr = new HLRBRep_Algo();
         //        brep_hlr->Debug(true);
-        brep_hlr->Add(inShape, m_isoCount);
+        if (m_projectionSources.empty()) {
+            brep_hlr->Add(inShape, m_isoCount);
+        }
+        else {
+            for (const auto& source : m_projectionSources) {
+                if (!source.shape.IsNull()) {
+                    brep_hlr->Add(source.shape, m_isoCount);
+                }
+            }
+        }
         if (m_isPersp) {
             double fLength = std::max(Precision::Confusion(), m_focus);
             HLRAlgo_Projector projector(viewAxis, fLength);
@@ -242,6 +255,16 @@ void GeometryObject::projectShape(const TopoDS_Shape& inShape, const gp_Ax2& vie
             "GeometryObject::projectShape - unknown error occurred while extracting edges");
     }
 
+    if (!m_projectionSources.empty()) {
+        try {
+            HLRBRep_HLRToShape hlrToShape(brep_hlr);
+            collectRebarProjections(hlrToShape);
+        }
+        catch (const Standard_Failure&) {
+            //rebar styling is optional; do not fail the whole projection
+        }
+    }
+
     makeTDGeometry();
 }
 
@@ -281,6 +304,227 @@ void GeometryObject::makeTDGeometry()
     if (dvp->IsoHidden.getValue() && (dvp->IsoCount.getValue() > 0)) {
         extractGeometry(EdgeClass::UVISO, false);
     }
+
+    tagRebarEdges();
+}
+
+
+void GeometryObject::collectRebarProjections(HLRBRep_HLRToShape& hlrToShape)
+{
+    m_rebarProjections.clear();
+    for (const auto& source : m_projectionSources) {
+        if (!source.isRebar || source.shape.IsNull()) {
+            continue;
+        }
+
+        auto extract = [](TopoDS_Shape shape) {
+            if (shape.IsNull()) {
+                return shape;
+            }
+            BRepLib::BuildCurves3d(shape);
+            return ShapeUtils::invertGeometry(shape);
+        };
+
+        RebarProjection projection;
+        projection.object = source.object;
+        projection.visHard = extract(hlrToShape.VCompound(source.shape));
+        projection.visOutline = extract(hlrToShape.OutLineVCompound(source.shape));
+        projection.visSmooth = extract(hlrToShape.Rg1LineVCompound(source.shape));
+        projection.visSeam = extract(hlrToShape.RgNLineVCompound(source.shape));
+        projection.visIso = extract(hlrToShape.IsoLineVCompound(source.shape));
+        projection.hidHard = extract(hlrToShape.HCompound(source.shape));
+        projection.hidOutline = extract(hlrToShape.OutLineHCompound(source.shape));
+        projection.hidSmooth = extract(hlrToShape.Rg1LineHCompound(source.shape));
+        projection.hidSeam = extract(hlrToShape.RgNLineHCompound(source.shape));
+        projection.hidIso = extract(hlrToShape.IsoLineHCompound(source.shape));
+        m_rebarProjections.push_back(std::move(projection));
+    }
+}
+
+void GeometryObject::collectRebarProjections(HLRBRep_PolyHLRToShape& hlrToShape)
+{
+    m_rebarProjections.clear();
+    for (const auto& source : m_projectionSources) {
+        if (!source.isRebar || source.shape.IsNull()) {
+            continue;
+        }
+
+        auto extract = [](TopoDS_Shape shape) {
+            if (shape.IsNull()) {
+                return shape;
+            }
+            BRepLib::BuildCurves3d(shape);
+            return ShapeUtils::invertGeometry(shape);
+        };
+
+        RebarProjection projection;
+        projection.object = source.object;
+        projection.visHard = extract(hlrToShape.VCompound(source.shape));
+        projection.visOutline = extract(hlrToShape.OutLineVCompound(source.shape));
+        projection.visSmooth = extract(hlrToShape.Rg1LineVCompound(source.shape));
+        projection.visSeam = extract(hlrToShape.RgNLineVCompound(source.shape));
+        projection.hidHard = extract(hlrToShape.HCompound(source.shape));
+        projection.hidOutline = extract(hlrToShape.OutLineHCompound(source.shape));
+        projection.hidSmooth = extract(hlrToShape.Rg1LineHCompound(source.shape));
+        projection.hidSeam = extract(hlrToShape.RgNLineHCompound(source.shape));
+        m_rebarProjections.push_back(std::move(projection));
+    }
+}
+
+void GeometryObject::tagRebarEdges()
+{
+    if (m_rebarProjections.empty()) {
+        return;
+    }
+
+    struct RebarEdge
+    {
+        TopoDS_Edge edge;
+        App::DocumentObject* object {nullptr};
+    };
+
+    std::vector<RebarEdge> rebarEdges;
+    auto addCompound = [this, &rebarEdges](TopoDS_Shape compound, App::DocumentObject* object) {
+        if (compound.IsNull()) {
+            return;
+        }
+
+        if (m_scrubCount > 0) {
+            std::vector<TopoDS_Edge> edgeVector = DU::shapeToVector(compound);
+            for (int i = 0; i < m_scrubCount; i++) {
+                edgeVector = DrawProjectSplit::removeOverlapEdges(edgeVector);
+            }
+            bool invertResult = false;
+            compound = DU::vectorToCompound(edgeVector, invertResult);
+        }
+
+        for (TopExp_Explorer edges(compound, TopAbs_EDGE); edges.More(); edges.Next()) {
+            rebarEdges.push_back({TopoDS::Edge(edges.Current()), object});
+        }
+    };
+
+    for (const auto& projection : m_rebarProjections) {
+        addCompound(projection.visHard, projection.object);
+        addCompound(projection.visOutline, projection.object);
+        addCompound(projection.visSmooth, projection.object);
+        addCompound(projection.visSeam, projection.object);
+        addCompound(projection.visIso, projection.object);
+        addCompound(projection.hidHard, projection.object);
+        addCompound(projection.hidOutline, projection.object);
+        addCompound(projection.hidSmooth, projection.object);
+        addCompound(projection.hidSeam, projection.object);
+        addCompound(projection.hidIso, projection.object);
+    }
+
+    if (rebarEdges.empty()) {
+        return;
+    }
+
+    constexpr double cellSize = 1.0e-3;
+    auto cellKey = [](const TopoDS_Edge& edge, double cell) {
+        std::array<long long, 3> key {0, 0, 0};
+        Bnd_Box box;
+        BRepBndLib::AddOptimal(edge, box);
+        if (box.IsVoid()) {
+            return key;
+        }
+
+        double xMin = 0.0;
+        double yMin = 0.0;
+        double zMin = 0.0;
+        double xMax = 0.0;
+        double yMax = 0.0;
+        double zMax = 0.0;
+        box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+        key[0] = static_cast<long long>(std::floor((xMin + xMax) * 0.5 / cell));
+        key[1] = static_cast<long long>(std::floor((yMin + yMax) * 0.5 / cell));
+        key[2] = static_cast<long long>(std::floor((zMin + zMax) * 0.5 / cell));
+        return key;
+    };
+
+    std::map<std::array<long long, 3>, std::vector<std::size_t>> edgeGrid;
+    for (std::size_t i = 0; i < rebarEdges.size(); i++) {
+        edgeGrid[cellKey(rebarEdges[i].edge, cellSize)].push_back(i);
+    }
+
+    for (const auto& geom : edgeGeom) {
+        if (geom->getCosmetic() || geom->isRebar()) {
+            continue;
+        }
+
+        auto key = cellKey(geom->getOCCEdge(), cellSize);
+        bool matched = false;
+        for (int dx = -1; dx <= 1 && !matched; dx++) {
+            for (int dy = -1; dy <= 1 && !matched; dy++) {
+                for (int dz = -1; dz <= 1 && !matched; dz++) {
+                    auto it = edgeGrid.find({key[0] + dx, key[1] + dy, key[2] + dz});
+                    if (it == edgeGrid.end()) {
+                        continue;
+                    }
+
+                    for (auto index : it->second) {
+                        if (edgesMatch(geom->getOCCEdge(), rebarEdges[index].edge, EWTOLERANCE)) {
+                            geom->setIsRebar(true);
+                            geom->setSourceObject(rebarEdges[index].object);
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+bool GeometryObject::edgesMatch(const TopoDS_Edge& edge1, const TopoDS_Edge& edge2,
+                                double tolerance)
+{
+    if (edge1.IsNull() || edge2.IsNull()) {
+        return false;
+    }
+    if (edge1.IsSame(edge2) || edge1.IsEqual(edge2)) {
+        return true;
+    }
+
+    Bnd_Box box1;
+    Bnd_Box box2;
+    BRepBndLib::AddOptimal(edge1, box1);
+    BRepBndLib::AddOptimal(edge2, box2);
+    if (box1.IsVoid() || box2.IsVoid() || box1.IsOut(box2)) {
+        return false;
+    }
+
+    try {
+        BRepAdaptor_Curve curve1(edge1);
+        BRepAdaptor_Curve curve2(edge2);
+        const double first1 = curve1.FirstParameter();
+        const double last1 = curve1.LastParameter();
+        const double first2 = curve2.FirstParameter();
+        const double last2 = curve2.LastParameter();
+
+        constexpr int sampleCount = 4;
+        for (int orientation = 0; orientation < 2; orientation++) {
+            bool same = true;
+            for (int i = 0; i <= sampleCount; i++) {
+                const double ratio = static_cast<double>(i) / sampleCount;
+                const double ratio2 = orientation == 0 ? ratio : 1.0 - ratio;
+                const gp_Pnt point1 = curve1.Value(first1 + (last1 - first1) * ratio);
+                const gp_Pnt point2 = curve2.Value(first2 + (last2 - first2) * ratio2);
+                if (!point1.IsEqual(point2, tolerance)) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                return true;
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+
+    return false;
 }
 
 
@@ -299,6 +543,11 @@ void GeometryObject::projectShapeWithPolygonAlgo(const TopoDS_Shape& input, cons
         gp_Pnt gCenter = ShapeUtils::findCentroid(input, viewAxis);
         Base::Vector3d motion(-gCenter.X(), -gCenter.Y(), -gCenter.Z());
         inCopy = ShapeUtils::moveShape(input, motion);
+        for (auto& source : m_projectionSources) {
+            if (!source.shape.IsNull()) {
+                source.shape = ShapeUtils::moveShape(source.shape, motion);
+            }
+        }
     }
     else {
         BRepBuilderAPI_Copy BuilderCopy(input);
@@ -311,9 +560,23 @@ void GeometryObject::projectShapeWithPolygonAlgo(const TopoDS_Shape& input, cons
         // HLRBRep_PolyAlgo will fail if the whole input shape has not been meshed.
         // meshing the faces is not sufficient.
         BRepMesh_IncrementalMesh(inCopy, 0.10);
+        for (const auto& source : m_projectionSources) {
+            if (!source.shape.IsNull()) {
+                BRepMesh_IncrementalMesh(source.shape, 0.10);
+            }
+        }
 
         brep_hlrPoly = new HLRBRep_PolyAlgo();
-        brep_hlrPoly->Load(inCopy);
+        if (m_projectionSources.empty()) {
+            brep_hlrPoly->Load(inCopy);
+        }
+        else {
+            for (const auto& source : m_projectionSources) {
+                if (!source.shape.IsNull()) {
+                    brep_hlrPoly->Load(source.shape);
+                }
+            }
+        }
 
         if (m_isPersp) {
             double fLength = std::max(Precision::Confusion(), m_focus);
@@ -384,6 +647,17 @@ void GeometryObject::projectShapeWithPolygonAlgo(const TopoDS_Shape& input, cons
     catch (...) {
         throw Base::RuntimeError("GeometryObject::projectShapeWithPolygonAlgo - unknown error "
                                  "occurred while extracting edges");
+    }
+
+    if (!m_projectionSources.empty()) {
+        try {
+            HLRBRep_PolyHLRToShape polyhlrToShape;
+            polyhlrToShape.Update(brep_hlrPoly);
+            collectRebarProjections(polyhlrToShape);
+        }
+        catch (const Standard_Failure&) {
+            //rebar styling is optional; do not fail the whole projection
+        }
     }
 
     makeTDGeometry();

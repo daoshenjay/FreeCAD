@@ -159,6 +159,9 @@ protected:
     bool showVertices() const;
 
 private:
+    void updateRebarWidthLimit();
+    bool m_rebarWidthLimitActive = false;
+    double m_rebarWidthLimit = 0.0;
     QList<QGraphicsItem*> deleteItems;
     PathBuilder* m_pathBuilder;
     TechDraw::LineGenerator* m_dashedLineGenerator;
