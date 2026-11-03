@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <pattern id="check" width="8" height="8" patternUnits="userSpaceOnUse">
+      <rect width="8" height="8" fill="#e8b04b"/>
+      <rect width="4" height="4" fill="#2f7fbf"/>
+      <rect x="4" y="4" width="4" height="4" fill="#2f7fbf"/>
+    </pattern>
+  </defs>
+  <g stroke="#2b2b2b" stroke-width="2" stroke-linejoin="round">
+    <path d="M32 6 L58 19 L32 32 L6 19 Z" fill="url(#check)"/>
+    <path d="M6 19 L32 32 L32 58 L6 45 Z" fill="#b5651d"/>
+    <path d="M58 19 L32 32 L32 58 L58 45 Z" fill="#8c4a12"/>
+  </g>
+</svg>
