@@ -74,3 +74,7 @@ tsupdate_stdout.log
 # pixi environments
 *.egg-info
 .pixi
+/release_build
+/_probe_dir
+/debug.log
+/docs/make_build_document_docx.py
