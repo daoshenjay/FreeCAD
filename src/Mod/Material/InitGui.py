@@ -48,4 +48,17 @@ class MaterialWorkbench(Gui.Workbench):
 
 Gui.addWorkbench(MaterialWorkbench())
 
+# ---------------------------------------------------------------------------
+# SwMaterial integration (the former SwMaterial workbench was dissolved)
+# ---------------------------------------------------------------------------
+# Keep the implementation in a real module: FreeCAD runs InitGui.py files with
+# ``exec(code)`` inside a function, so helpers defined here would not be
+# reachable from callbacks invoked after initialization has finished.
+try:
+    from swmaterial import integration
+
+    integration.install()
+except Exception as exc:  # never let the material dock break this module
+    App.Console.PrintWarning("SwMaterial commands unavailable: {}\n".format(exc))
+
 FreeCAD.__unit_test__ += [ "TestMaterialsGui" ]

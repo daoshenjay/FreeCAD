@@ -287,6 +287,13 @@ macro(generate_from_any INPUT_FILE OUTPUT_FILE VARIABLE)
 endmacro(generate_from_any)
 
 
+# On Windows, Debug builds normally get a "_d" suffix (FreeCADBase_d.dll ...).
+# Turn this option ON to keep the plain names in Debug builds as well, e.g. when
+# the build tree holds binaries that were produced without the suffix and the
+# install step must pick them up without relinking the whole project.
+option(FREECAD_NO_DEBUG_OUTPUT_SUFFIX
+    "Do not append '_d' to the file names of Windows debug binaries" OFF)
+
 # Function to replace all the binary output locations.
 # SET_BIN_DIR(ProjectName [OutputName])
 #   ProjectName is the name of the target
@@ -322,7 +329,7 @@ function(SET_BIN_DIR ProjectName)
     set_target_properties(${ProjectName} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}${LIB_DIR})
     set_target_properties(${ProjectName} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_BINARY_DIR}${LIB_DIR})
 
-    if(WIN32)
+    if(WIN32 AND NOT FREECAD_NO_DEBUG_OUTPUT_SUFFIX)
         set_target_properties(${ProjectName} PROPERTIES DEBUG_OUTPUT_NAME ${OutputName}_d)
     elseif(RELATIVE_RPATH)
         get_target_property(TARGET_TYPE ${ProjectName} TYPE)

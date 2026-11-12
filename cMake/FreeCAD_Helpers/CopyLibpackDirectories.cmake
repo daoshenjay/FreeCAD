@@ -18,6 +18,14 @@ macro(CopyLibpackDirectories)
         if(FREECAD_LIBPACK_VERSION VERSION_GREATER_EQUAL "3.0.0" AND FREECAD_LIBPACK_VERSION VERSION_LESS "3.1.0")
             file(COPY ${FREECAD_LIBPACK_DIR}/resources DESTINATION ${CMAKE_BINARY_DIR})
         endif()
+        # Qt QML modules ship at the LibPack root (${FREECAD_LIBPACK_DIR}/qml), not in its bin
+        # directory, so nothing else copies them into the build tree. Qt resolves imports through
+        # QLibraryInfo::QmlImportsPath, which is <bin>/qml for our qt.conf (Prefix=bin); without
+        # them QtQuick based addons fail with "module QtQuick.Controls is not installed".
+        if(EXISTS ${FREECAD_LIBPACK_DIR}/qml)
+            message(STATUS "Copying LibPack 'qml' directory to build 'bin/qml' directory...")
+            file(COPY ${FREECAD_LIBPACK_DIR}/qml DESTINATION ${CMAKE_BINARY_DIR}/bin)
+        endif()
         message(STATUS "... end copying.\n=======================================\n")
     endif()
 
@@ -70,6 +78,13 @@ macro(CopyLibpackDirectories)
             install(DIRECTORY ${FREECAD_LIBPACK_DIR}/resources DESTINATION ${CMAKE_INSTALL_PREFIX})
         endif()
         install(DIRECTORY ${FREECAD_LIBPACK_DIR}/bin DESTINATION ${CMAKE_INSTALL_PREFIX})
+        # Qt QML modules are shipped at the LibPack root (${FREECAD_LIBPACK_DIR}/qml), not in bin,
+        # so the rule above only recreates an empty bin/qml directory skeleton. Install the real
+        # modules, otherwise QtQuick based addons (e.g. Nxt) fail with
+        # "module QtQuick.Controls is not installed".
+        if(EXISTS ${FREECAD_LIBPACK_DIR}/qml)
+            install(DIRECTORY ${FREECAD_LIBPACK_DIR}/qml DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
+        endif()
         install(DIRECTORY ${FREECAD_LIBPACK_DIR}/lib DESTINATION ${CMAKE_INSTALL_PREFIX} FILES_MATCHING PATTERN "*.dll")
         if(CMAKE_BUILD_TYPE STREQUAL "Debug")
             install(DIRECTORY ${FREECAD_LIBPACK_DIR}/lib DESTINATION ${CMAKE_INSTALL_PREFIX} FILES_MATCHING PATTERN "*.pdb")

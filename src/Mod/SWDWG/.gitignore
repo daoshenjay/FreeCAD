@@ -1,0 +1,65 @@
+# ===== 编译/链接产物 =====
+*.obj
+*.o
+*.a
+*.so
+*.pyd
+*.dll
+*.exp
+*.lib
+*.pdb
+*.ilk
+*.d
+*.slo
+*.lo
+*.gch
+*.pch
+*.dylib
+*.mod
+*.smod
+*.lai
+*.la
+*.exe
+*.out
+*.app
+
+# ===== 编译输出日志 =====
+compile_out.txt
+link_out.txt
+verify_out.txt
+
+# ===== CMake / VS 生成物 =====
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.vcxproj
+*.vcxproj.user
+*.sln
+.vs/
+
+# ===== Python 缓存 =====
+__pycache__/
+*.pyc
+
+# ===== 开发辅助脚本（临时，不入库） =====
+App/build_app.bat
+App/build_link.bat
+App/run_compile.bat
+App/run_compile.ps1
+App/compile_app.ps1
+App/verify_text.py
+Gui/compile_gui.ps1
+Gui/run_compile.ps1
+
+# ===== SWDWG 技术文档（仅本地维护，不上传 Gitee） =====
+/SWDWG模块技术文档.md
+/SWDWG文字样式解决方案.md
+/docs/
+
+# ===== SWDWG 构建/调试日志（不入库） =====
+build.err
+build.log
+svgbuild.log
+
+# ===== 开发辅助脚本（临时，不入库） =====
+Gui/compile_test.ps1

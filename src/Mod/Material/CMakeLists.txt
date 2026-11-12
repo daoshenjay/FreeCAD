@@ -365,6 +365,31 @@ fc_target_copy_resource(MaterialToolsLib
 
 INSTALL(FILES ${MaterialTools_Files} DESTINATION Mod/Material/materialtools)
 
+# The material dock that used to ship as the SwMaterial workbench.  Its GUI
+# commands are registered by InitGui.py on the Material workbench.
+SET(MaterialSwMaterial_Files
+    swmaterial/__init__.py
+    swmaterial/core.py
+    swmaterial/paths.py
+    swmaterial/mapping.py
+    swmaterial/panel.py
+    swmaterial/texture.py
+    swmaterial/textures.py
+    swmaterial/commands.py
+    swmaterial/integration.py
+)
+
+ADD_CUSTOM_TARGET(MaterialSwMaterial ALL
+    SOURCES ${MaterialSwMaterial_Files}
+)
+
+fc_target_copy_resource(MaterialSwMaterial
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_BINARY_DIR}/Mod/Material
+    ${MaterialSwMaterial_Files})
+
+INSTALL(FILES ${MaterialSwMaterial_Files} DESTINATION Mod/Material/swmaterial)
+
 ADD_CUSTOM_TARGET(MaterialLib ALL
     SOURCES ${MaterialLib_Files}
 )
@@ -435,3 +460,10 @@ foreach(file ${MaterialLib_Files} ${FluidMaterial_Files} ${AppearanceLib_Files} 
         DESTINATION ${CMAKE_INSTALL_DATADIR}/Mod/Material/${filepath}
     )
 endforeach()
+
+# Built-in texture library of the material dock (several hundred images).  Data
+# only, so it is not copied into the build tree (see the notes in paths.py).
+INSTALL(
+    DIRECTORY Resources/textures
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/Mod/Material/Resources
+)

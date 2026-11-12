@@ -34,7 +34,15 @@ App.addImportType("Common airfoil data (*.dat *.DAT)", "importAirfoilDAT")
 App.addExportType("Autodesk DXF 2D (*.dxf)", "importDXF")
 App.addTranslatableExportType(translate("FileFormat", "Flattened SVG"), ["svg"], "importSVG")
 App.addExportType("Open CAD (*.oca)", "importOCA")
-App.addImportType("Autodesk DWG 2D (*.dwg *.DWG)", "importDWG")
-App.addExportType("Autodesk DWG 2D (*.dwg)", "importDWG")
+# DWG: both import and export are registered by Mod/SWDWG/Init.py (native,
+# LibreDWG based).  Draft's own *.dwg entries are deliberately NOT registered
+# any more:
+#   * two import filters claiming "dwg" make FreeCAD show the "Select Module"
+#     dialog on every open / drag-drop / command line call;
+#   * the export filter would be a second, non working DWG entry next to the
+#     native writer.
+# Draft's importDWG module is still there and can be called from Python.
+# App.addImportType("Autodesk DWG 2D (*.dwg *.DWG)", "importDWG")
+# App.addExportType("Autodesk DWG 2D (*.dwg)", "importDWG")
 
 App.__unit_test__ += ["TestDraft"]

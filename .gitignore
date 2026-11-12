@@ -74,3 +74,9 @@ tsupdate_stdout.log
 # pixi environments
 *.egg-info
 .pixi
+/release_build
+/tests
+/docs
+/_probe_dir
+/debug.log
+/_probe_sandbox.txt

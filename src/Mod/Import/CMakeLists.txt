@@ -57,6 +57,29 @@ if(BUILD_GUI)
     list (APPEND Import_Scripts TestImportGui.py)
 endif(BUILD_GUI)
 
+# Pure-Python glTF reader/writer (see InitGui.py).  It lives next to the C++
+# Import module so that the fork's glTF handling is kept in one place.
+set(Import_SwGlb
+    swglb/__init__.py
+    swglb/gltf.py
+    swglb/export.py
+    swglb/reader.py
+    swglb/importer.py
+    swglb/objects.py
+)
+
+add_custom_target(ImportSwGlb ALL
+    SOURCES ${Import_SwGlb}
+)
+
+fc_target_copy_resource(ImportSwGlb
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_BINARY_DIR}/Mod/Import
+    ${Import_SwGlb}
+)
+
+INSTALL(FILES ${Import_SwGlb} DESTINATION Mod/Import/swglb)
+
 add_custom_target(ImportScripts ALL
     SOURCES ${Import_Scripts} ${DXF_Plate}
 )

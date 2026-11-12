@@ -18,6 +18,16 @@ if(BUILD_DRAFT)
   add_subdirectory(Draft)
 endif(BUILD_DRAFT)
 
+# Workbenches maintained on this branch (pure-Python modules living next to the
+# stock ones).  Guarded by EXISTS so a checkout without them still configures.
+# 导出功能 BEGIN：SwExportDWG 工作台已删除，DWG 导出并入 SWDWG。
+foreach(_swModule SWDWG)
+# 导出功能 END
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_swModule}/CMakeLists.txt")
+    add_subdirectory(${_swModule})
+  endif()
+endforeach()
+
 if(BUILD_FEM)
     add_subdirectory(Fem)
 endif(BUILD_FEM)

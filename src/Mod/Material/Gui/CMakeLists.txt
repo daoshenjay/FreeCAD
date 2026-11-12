@@ -149,6 +149,12 @@ SET(MatGuiIcon_SVG
     Resources/icons/preferences-material.svg
     Resources/icons/preview-rendered.svg
     Resources/icons/preview-vector.svg
+    Resources/icons/SwMaterialApply.svg
+    Resources/icons/SwMaterialClear.svg
+    Resources/icons/SwMaterialFaces.svg
+    Resources/icons/SwMaterialPanel.svg
+    Resources/icons/SwMaterialTexture.svg
+    Resources/icons/SwMaterialTextureOff.svg
     Resources/icons/table.svg
 )
 

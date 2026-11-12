@@ -39,6 +39,13 @@ FreeCAD.changeImportModule("STEP with colors (*.step *.STEP *.stp *.STP)", "Impo
 FreeCAD.changeExportModule("STEP with colors (*.step *.stp)", "Import", "ImportGui")
 FreeCAD.changeExportModule("glTF (*.gltf *.glb)", "Import", "ImportGui")
 
+# glTF: route the format through the pure-Python reader/writer in ./swglb.  It
+# keeps materials, texture coordinates and textures that the OCCT based
+# reader/writer drop.  Only redirected here (GUI start), so that FreeCADCmd and
+# other headless runs keep using the C++ handler.
+FreeCAD.changeImportModule("glTF (*.gltf *.GLTF *.glb *.GLB)", "ImportGui", "swglb.importer")
+FreeCAD.changeExportModule("glTF (*.gltf *.glb)", "ImportGui", "swglb.export")
+
 App.__unit_test__ += ["TestImportGui"]
 
 """
